@@ -1,8 +1,8 @@
 stages:
-  stage_name:
-    cmd: python src/parse_site_data.py
+  1.1_parse_site_data:
+    cmd: python pipeline/parse_site_data.py
     deps:
-      - src/parse_site_data.py
+      - pipeline/1.1_parse_site_data.py
       - data/mf_sites
     outs:
       - data/site_labels.csv

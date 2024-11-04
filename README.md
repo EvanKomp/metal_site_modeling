@@ -4,54 +4,30 @@ This is the README file for the metalsitenn project.
 
 ## Overview
 
-The metalsitenn project is a Python module that provides functionality for working with metal sites in materials science.
-
-## Installation
-
-To install the metalsitenn module, you can use pip. Run the following command:
-
-```shell
-pip install metalsitenn
-```
-
-## Usage
-
-Here is an example of how to use the metalsitenn module:
-
-```python
-import metalsitenn
-
-# Create a metal site object
-site = metalsitenn.MetalSite(element='Fe', position=[0, 0, 0])
-
-# Print the element and position of the metal site
-print(f"Element: {site.element}")
-print(f"Position: {site.position}")
-```
+DVC tracked pipeline to train a protein metal functional site foundational model. Used for clustering, downstream prediction, finetuning. The model is equivariant and can output scalars and vectors for each atom in the protein. Pooling over the whole protein can produce a single embedding.
 
 ## Dependencies
+- `e3nn`
+- `torch`
+- `torch-geometric`
 
-The metalsitenn module has the following dependencies:
+## Notes
 
-- dvc
-- pytorch
-- pandas
-- numpy
-- e3nn
+- Featurization can ignore metal identity, this atomic number vocabular contains an indicator for 'metal' atoms.
+- Pretraining: masked modeling of atom identities, gaussian noise on atom positions
 
-You can install these dependencies by running the following command:
+# Pipeline steps
 
-```shell
-pip install -r requirements.txt
-```
 
-## Contributing
+- `1.1_parse_site_data`: Get some labels and statistics for each metal site in the dataset.
+    - __Input__: `data/mf_sites/`, contains chunks of PDB files with metal sites.
+    - __Output__: `data/site_labels.csv`, per site labels, `data/metrics/site_label_metrics.json` aggregated metrics
 
-If you would like to contribute to the metalsitenn project, please follow the guidelines in the CONTRIBUTING.md file.
+# Components
 
-## License
-
-The metalsitenn project is licensed under the MIT License. See the LICENSE file for more information.
-```
-
-Please note that the contents of this file are just a template and you may need to modify it to fit your specific project.
+- `metalsitenn.data.SiteFeaturizer` From PDB files, output a graph with atom features and adjacency matrix.
+    - __Params__: `metal_known` whether the metal identity will be retained or replced by "metal" indicator.
+    
+- `metalssitenn.data.SiteCollater` From a list of graphs/dataset, produce batches with expected information for pretraining. The model will take in positions and node features, and we also need the labels for atom type and positions before we noised them, and the indices where we did, to compute losses.
+  - __Params__: `atom_mask_rate`, `position_noise_rate`, `position_noise_width`
+  - __Returns__: `node_features`, `node_positions`, `label_features`, `label_positions`, `mask_indices`, `noise_indices`
