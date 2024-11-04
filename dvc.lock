@@ -1,0 +1,23 @@
+schema: '2.0'
+stages:
+  stage_name:
+    cmd: python src/parse_site_data.py
+    deps:
+    - path: data/mf_sites
+      hash: md5
+      md5: c76890a1546d53affdc3379c72a4ce76.dir
+      size: 6655444663
+      nfiles: 314974
+    - path: src/parse_site_data.py
+      hash: md5
+      md5: 40a13842e8d48e14435421639d2e3152
+      size: 2940
+    outs:
+    - path: data/metrics/site_label_metrics.json
+      hash: md5
+      md5: 6fb44b5fced884503be1d47508145ff3
+      size: 99
+    - path: data/site_labels.csv
+      hash: md5
+      md5: ec0d15f08c081acc9d39eb7902bf1105
+      size: 8570349

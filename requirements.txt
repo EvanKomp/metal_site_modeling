@@ -1,0 +1,6 @@
+dvc
+pandas
+numpy
+biopython
+matplotlib
+seaborn
