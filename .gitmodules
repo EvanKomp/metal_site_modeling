@@ -1,0 +1,3 @@
+[submodule "equiformer"]
+	path = equiformer
+	url = git@github.com:atomicarchitects/equiformer.git
