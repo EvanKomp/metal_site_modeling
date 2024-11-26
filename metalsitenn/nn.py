@@ -29,6 +29,8 @@ from equiformer.nets.graph_attention_transformer import (
     EquivariantDropout,
     GraphDropPath,
     FeedForwardNetwork,
+    GaussianRadialBasisLayer,
+    EdgeDegreeEmbeddingNetwork,
     sort_irreps_even_first,
     get_mul_0,
     get_norm_layer
@@ -462,7 +464,36 @@ class TransformerBlock(torch.nn.Module):
     
 
 class MetalSiteFoundationalModel(torch.nn.Module):
+    """E3-equivariant transformer model for learning protein metal site representations.
 
+    Processes protein structure graphs using SO(3)-equivariant attention mechanisms. Takes atomic coordinates and identities as input 
+    and produces equivariant node-level features that can be used for downstream tasks.
+
+    Args:
+        irreps_node_embedding: Irreps for initial node embeddings after projection. Default: 128 scalars, 64 vectors, 32 l=2
+        irreps_sh: Irreps for spherical harmonics edge features. Default: up to l=3
+        irreps_output: Irreps for final node features. Default: same as node embedding
+        tokenizer: Vocabulary for converting atomic info to indices
+        atom_embedding_dims: Dimension for atomic feature embedding. Default: 16
+        max_radius: Maximum radius in Angstroms for constructing edges. Default: 6.0
+        number_basis: Number of radial basis functions. Default: 32 
+        fc_neurons: Hidden layer sizes for radial networks. Default: [32, 32]
+        irreps_head: Feature irreps per attention head. Default: 32 scalars, 16 vectors, 8 l=2
+        num_head: Number of attention heads. Default: 4
+        num_layers: Number of transformer blocks. Default: 2
+        alpha_drop: Dropout rate for attention weights. Default: 0.0
+        proj_drop: Dropout rate for projections. Default: 0.0
+        out_drop: Dropout rate for outputs. Default: 0.0
+        drop_path_rate: Dropout rate for skip connections. Default: 0.0
+        avg_aggregate_num: Number of neighbors for edge degree embedding. Default: 12
+
+    Returns:
+        node_hidden_state: Node features with irreps_output symmetry
+        node_attrs: Original one-hot node attributes
+
+    Raises:
+        ValueError: If tokenizer is not provided
+    """
     def __init__(
         self,
         irreps_node_embedding: o3.Irreps=o3.Irreps('128x0e+64x1o+32x2e'),
@@ -670,3 +701,46 @@ class MetalSiteNodeModel(torch.nn.Module):
         )
         atom_scalars, atom_type_scalars, vectors = self.node_head(node_hidden_state, node_attrs)
         return atom_scalars, atom_type_scalars, vectors
+    
+
+def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple[o3.Irreps, o3.Irreps]:
+    """Generate scalable irreps for network features and attention heads.
+    
+    Args:
+        l: Maximum order of irreps
+        scale: Base multiplicity for l=0 irreps
+        decay: Factor to reduce multiplicity for each l (decay^l)
+        num_heads: If provided, returns attention head irreps with multiplicities divided by num_heads
+    
+    Returns:
+        hidden_irreps: Full irreps for hidden features
+        head_irreps: Irreps for attention heads if num_heads provided, else None
+    """
+    irreps = []
+    head_irreps = []
+    
+    for i in range(l + 1):
+        # Calculate multiplicity with decay
+        mult = int(scale * (decay ** i))
+        if mult == 0:
+            continue
+            
+        # Add even and odd irreps of order i
+        irreps.extend([
+            (mult, (i, 1)),  # even
+            (mult, (i, -1))  # odd
+        ])
+        
+        # Calculate head multiplicities if requested
+        if num_heads is not None:
+            head_mult = math.ceil(mult / num_heads)
+            if head_mult > 0:
+                head_irreps.extend([
+                    (head_mult, (i, 1)),
+                    (head_mult, (i, -1))
+                ])
+    
+    hidden_irreps = o3.Irreps(irreps)
+    head_irreps = o3.Irreps(head_irreps) if num_heads is not None else None
+    
+    return hidden_irreps, head_irreps

@@ -13,8 +13,7 @@ import re
 import pandas as pd
 
 import torch
-from torch_geometric.data import Data, Dataset
-from torch_geometric.transforms import RadiusGraph
+from torch_geometric.data import Data, Batch
 
 class PDBReader:
     """Reads PDB files to extract atomic coordinates and metadata.
@@ -68,3 +67,95 @@ class PDBReader:
                 outs = self.read(os.path.join(pdb_dir, file))
                 outs['id'] = file.split('.')[0]
                 yield outs
+
+
+class AtomicSystemCollator:
+    """Collates atomic system data with optional masking and position noising.
+    
+    Args:
+        tokenizer: AtomTokenizer instance for mask token
+        max_radius: Maximum radius for graph construction (Å)
+        mask_rate: Fraction of atoms to mask (default: None)
+        noise_rate: Fraction of positions to add noise to (default: None)  
+        noise_width: Standard deviation of gaussian noise (default: 0.1Å)
+    """
+    def __init__(
+        self,
+        tokenizer,
+        mask_rate: float = None,
+        noise_rate: float = None,
+        noise_width: float = 0.1
+    ):
+        self.mask_token = tokenizer.mask_token
+        self.mask_rate = mask_rate
+        self.noise_rate = noise_rate
+        self.noise_width = noise_width
+
+    def __call__(self, batch: List[dict]) -> Batch:
+        """Collate batch of atomic systems with masking and noise.
+        
+        Args:
+            batch: List of dicts with keys:
+                - atoms: Tensor of atom type indices 
+                - atom_types: Tensor of ATOM/HETATM indices
+                - positions: Tensor of 3D coordinates
+                - label_*: Any label tensors
+        
+        Returns:
+            PyG Batch object with:
+                - atoms: Atom type indices (masked if mask_rate > 0)  
+                - atom_types: ATOM/HETATM record indices
+                - pos: Noised positions if noise_rate > 0
+                - original_pos: Original positions if noise applied
+                - edge_index: [2, num_edges] COO format edge indices
+                - batch: Batch assignment for each node
+                - mask_mask: Mask for masked atoms
+                - noise_mask: Mask for noised positions
+                - label_*: Original label tensors
+        """
+        # Create list of Data objects
+        data_list = []
+        for i, d in enumerate(batch):
+            data = Data(
+                atoms=d['atoms'],
+                atom_types=d['atom_types'], 
+                pos=d['positions']
+            )
+            
+            # Add any labels
+            for k, v in d.items():
+                if k.startswith('label_'):
+                    data[k] = v
+                    
+            data_list.append(data)
+
+        # Batch the data
+        batch = Batch.from_data_list(data_list)
+        
+        # Apply masking
+        if self.mask_rate:
+            n_mask = int(len(batch.atoms) * self.mask_rate)
+            mask_idx = torch.randperm(len(batch.atoms))[:n_mask]
+            batch.atoms[mask_idx] = self.mask_token
+            batch.atom_types[mask_idx] = self.mask_token
+            #conver indexes into a bool mask
+            batch.atom_mask = torch.zeros(len(batch.atoms), dtype=torch.bool)
+            batch.atom_mask[mask_idx] = True
+
+        else:
+            batch.atom_mask = None
+
+        # Apply position noise  
+        if self.noise_rate:
+            n_noise = int(len(batch.pos) * self.noise_rate)
+            noise_idx = torch.randperm(len(batch.pos))[:n_noise]
+            batch.original_pos = batch.pos[noise_idx].clone()
+            batch.pos[noise_idx] += torch.randn_like(batch.pos[noise_idx]) * self.noise_width
+            batch.noise_mask = torch.zeros(len(batch.pos), dtype=torch.bool)
+            batch.noise_mask[noise_idx] = True
+        else:
+            batch.noise_mask = None
+
+        batch.atom_tokens = torch.vstack([batch.atoms, batch.atom_types]).T
+
+        return batch

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metalsitenn"
+version = "0.1"
+description = "Neural network modeling of metal binding sites"
+authors = [{name = "Evan Komp", email = "evan.komp@nrel.gov"}]
+requires-python = ">=3.9"
+dependencies = [
+    "biopython",
+    "pandas",
+    "numpy",
+    "torch",
+    "torch-sparse"
+]

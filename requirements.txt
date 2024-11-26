@@ -4,3 +4,8 @@ numpy
 biopython
 matplotlib
 seaborn
+torch
+torch-geometric
+e3nn
+graphein
+torch-scatter

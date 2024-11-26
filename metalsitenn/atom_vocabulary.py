@@ -82,6 +82,8 @@ class AtomVocabulary(BaseVocabulary):
             self.metal_token = next_token
             
         self.itos = {v:k for k,v in self.stoi.items()}
+        if not metal_known:
+            self.itos[self.metal_token] = 'METAL'
         self.vocab_size = len(self.stoi)
 
 
