@@ -26,10 +26,33 @@ Analyzes metal binding sites to extract core statistics and labels.
 - `max_radius`: Cutoff distance for coordinating residues
 - `structure_checks`: Additional validation criteria
 
+### 1.2 Create HuggingFace Dataset
+Converts PDB files into a tokenized HuggingFace dataset for efficient training.
+
+**Inputs**:  
+- `data/mf_sites/*.pdb`: PDB format files containing metal binding sites
+- `data.model_hydrogens`: DVC param for hydrogen inclusion
+- `data.metal_known`: DVC param for metal token handling
+
+**Params**:
+- `data.model_hydrogens`: Include hydrogen atoms in model
+- `data.metal_known`: Use unique tokens for metals vs generic METAL token
+- `data.test_frac`: Fraction of sites to reserve for testing
+
+**Outputs**:
+- `data/dataset/metal_site_dataset`: HuggingFace dataset dict containing:
+  - Atomic coordinates
+  - Tokenized atom identities
+  - Record types (ATOM/HETATM)
+  - System IDs
+
+**Script**: `pipeline/1.2_create_dataset.py`
+
 ## DVC Params
 
 data.model_hydrogens: bool=False # Include hydrogen atoms in model
 data.metal_known: bool=False # Use unique tokens for metals vs generic METAL token
+data.test_frac: float=0.1 # Fraction of sites to reserve for testing
 
 model.max_l: int=3 # Maximum order of irreps to consider within the model
 model.hidden_scale: int=128 # base multiplicity for l=0 irreps, eg. Xe0 + Xo0 + ...

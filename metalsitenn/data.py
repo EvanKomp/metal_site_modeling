@@ -25,10 +25,10 @@ class PDBReader:
     - Record types (ATOM/HETATM)
     """
     
-    def __init__(self, deprotonate: bool = False):
+    def __init__(self, deprotonate: bool = False, skip_only_hetatm: bool = True):
         self.parser = PandasPdb()
-        self.deprotonate = deprotonate  
-
+        self.deprotonate = deprotonate
+        self.skip_only_hetatm = skip_only_hetatm
         
     def read(self, pdb_path: str) -> Tuple[np.ndarray, List[str], List[str], List[str]]:
         """Read PDB file and extract atomic information.
@@ -45,7 +45,7 @@ class PDBReader:
         structure = self.parser.read_pdb(pdb_path)
         df = pd.concat([structure.df['ATOM'], structure.df['HETATM']])
         if self.deprotonate:
-            df = df[~(df['element_symbol'] == 'H')]
+            df = df[~(df['element_symbol'].isin(['H', 'D']))]
         
         positions = df[['x_coord', 'y_coord', 'z_coord']].values
         atom_names = df['atom_name'].tolist()
@@ -66,6 +66,8 @@ class PDBReader:
             if file.endswith(".pdb"):
                 outs = self.read(os.path.join(pdb_dir, file))
                 outs['id'] = file.split('.')[0]
+                if self.skip_only_hetatm and all([x == 'HETATM' for x in outs['atom_types']]):
+                    continue
                 yield outs
 
 

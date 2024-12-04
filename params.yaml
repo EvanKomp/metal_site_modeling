@@ -1,3 +1,28 @@
-# Parameters and configurations for the DVC pipeline
+data:
+  model_hydrogens: false # Include hydrogen atoms in model
+  metal_known: false # Use unique tokens for metals vs generic METAL token
+  aggregate_uncommon: true # Aggregate uncommon atom types into a single token
+  test_frac: 0.1 # Fraction of data to use for testing
 
-# Add your parameters here
+model:
+  max_l: 3 # Maximum order of irreps to consider within the model
+  hidden_scale: 128 # base multiplicity for l=0 irreps, eg. Xe0 + Xo0 + ...
+  hidden_scale_decay: 0.5 # Multiplicative decay factor for each additional l, eg. Xe1 = Xe0 * hidden_scale_decay
+  num_attention_layers: 3 # Number of transformer blocks
+  num_heads: 8 # Number of attention heads within each transformer block
+  alpha_drop: 0.1 # Attention dropout rate
+  proj_drop: 0.1 # Projection dropout rate
+  drop_path_rate: 0.1 # Skip connection dropout rate
+  out_drop: 0.1 # Output layer dropout rate
+  norm_layer: layer_norm # Normalization layer type
+  max_radius: 6.0 # Maximum edge distance for attention
+  num_radial_basis: 32 # Number of gaussian radial basis functions to embed edge distances
+
+training:
+  atom_mask_rate: 0.15 # Fraction of atoms to mask during training
+  coord_noise_rate: 0.15 # Fraction of coordinates to noise during training
+  zero_noise_in_loss_rate: 0.05 # Additional fraction of coordinates that will not be noised but will be included in loss
+  noise_scale: 1.0 # Standard deviation of noise to apply to coordinates - Units of Angstrom.
+  batch_size: 2 # Number of PDB systems per batch
+  loss_balance: 0.5 # Weighting factor for balancing atom and position loss, 0.2 = 80% atom loss, 20% position loss
+  val_frac: 0.1 # Fraction of data to use for validation

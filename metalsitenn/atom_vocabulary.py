@@ -10,21 +10,40 @@
 from typing import List, Union, Dict, Set
 import torch
 import numpy as np
-from .constants import (METAL_IONS, RECORD_TYPES, ATOMS)
+from .constants import (METAL_IONS, RECORD_TYPES, COMMON_PROTEIN_ATOMS, UNCOMMON_PROTEIN_ATOMS)
+
+import logging
+logger = logging.getLogger(__name__)
+
+# unknonw token error
+class UnknownTokenError(Exception):
+    pass
 
 class BaseVocabulary:
     """Base vocabulary class for atomic properties."""
-    def __init__(self, vocab: Set[str], include_mask: bool = True):
+    def __init__(self, vocab: Set[str], include_mask: bool = True, allow_unknown: bool = False):
         self.stoi = {}
         if include_mask:
             self.stoi['<MASK>'] = 0
             self.mask_token = 0
+
+        self.allow_unknown = allow_unknown
+        if allow_unknown:
+            next_token = self._get_next_token_index()
+            self.stoi['<UNK>'] = next_token
+            self.stoi['X'] = next_token
+            self.unk_token = next_token
         
         for token in sorted(vocab):
-            self.stoi[token] = len(self.stoi)
+            self.stoi[token] = self._get_next_token_index()
             
         self.itos = {v:k for k,v in self.stoi.items()}
-        self.vocab_size = len(self.stoi)
+        self.vocab_size = self._get_next_token_index()
+
+    def _get_next_token_index(self):
+        """Multiple strings may map to the same token, so we need to find the next available token index."""
+        unique_tokens = set(self.stoi.values())
+        return max(unique_tokens) + 1
 
     def encode(self, items: Union[str, List[str]]) -> Union[int, torch.Tensor]:
         """Convert string(s) to token(s)."""
@@ -36,7 +55,10 @@ class BaseVocabulary:
             # use multiple cpu if available
             return torch.tensor([self.stoi[item] for item in items], dtype=torch.long)
         except KeyError as e:
-            raise KeyError(f"Token not found in vocabulary: {e}, vocabulary is {self.stoi}")
+            if self.allow_unknown:
+                logger.warning(f"Unknown token: {e}")
+                return self.unk_token
+            raise UnknownTokenError(f"Unknown token: {e}, available are {self.stoi.keys()}")
 
     def decode(self, tokens: Union[int, torch.Tensor]) -> Union[str, List[str]]:
         """Convert token(s) to string(s)."""
@@ -49,42 +71,66 @@ class AtomVocabulary(BaseVocabulary):
     
     Args:
         metal_known: If True, each metal gets unique token. If False, single 'METAL' token
-        use_generic: If True, maps protein atoms to generic types (CA->C, OG->O, etc)
-        include_hydrogen: If True, includes H in vocabulary. If False, H gets mask token
+        include_hydrogen: If True, include hydrogen atoms in vocabulary
+        aggregate_uncommon: If True, aggregate uncommon elements into a single token
+        allow_unknown: If True, allow unknown tokens to be mapped to <UNK>, otherwise throw
     
     Attributes:
         vocab_size: Size of vocabulary including special tokens 
         mask_token: Integer token for masking (always 0)
         metal_token: Integer token for generic metal if metal_known=False
     """
+
     def __init__(
         self, 
         metal_known: bool = True, 
-        include_hydrogen: bool = True
+        include_hydrogen: bool = True,
+        aggregate_uncommon: bool = False,
+        allow_unknown: bool = False
     ): 
         
         # Filter hydrogen if not included
-        vocab = ATOMS.copy()
+        vocab = COMMON_PROTEIN_ATOMS
         if not include_hydrogen:
             vocab.remove('H')
+            vocab.remove('D')
             
-        super().__init__(vocab)
-        
+        super().__init__(vocab, include_mask=True, allow_unknown=allow_unknown)
+
         # Add metals
         if metal_known:
             for metal in sorted(METAL_IONS):
-                self.stoi[metal] = len(self.stoi)
+                self.stoi[metal] = self._get_next_token_index()
             self.metal_token = None
         else:
-            next_token = len(self.stoi)
+            next_token = self._get_next_token_index()
             for metal in METAL_IONS:
                 self.stoi[metal] = next_token
             self.metal_token = next_token
+
+        # add uncommon elements
+        if not aggregate_uncommon:
+            for atom in sorted(UNCOMMON_PROTEIN_ATOMS):
+                self.stoi[atom] = self._get_next_token_index()
+            self.uncommon_token = None
+        else:
+            next_token = self._get_next_token_index()
+            for atom in UNCOMMON_PROTEIN_ATOMS:
+                self.stoi[atom] = next_token
+            self.uncommon_token = next_token
             
         self.itos = {v:k for k,v in self.stoi.items()}
+
+        # update the metal token and uncommon token
+        # to reflect if they were combined, otherwise the last added 
+        # metal or uncommon would be in itos
         if not metal_known:
-            self.itos[self.metal_token] = 'METAL'
-        self.vocab_size = len(self.stoi)
+            self.itos[self.metal_token] = '<METAL>'
+        if aggregate_uncommon:
+            self.itos[self.uncommon_token] = '<UNCOMMON>'
+
+        # get vocab size
+        self.vocab_size = self._get_next_token_index()
 
 
 class AtomTypeVocabulary(BaseVocabulary):
@@ -98,9 +144,16 @@ class AtomTokenizer:
     def __init__(
             self,
             keep_hydrogen: bool = True,
-            metal_known: bool = True
+            metal_known: bool = True,
+            aggregate_uncommon: bool = False,
+            allow_unknown: bool = False
     ):
-        self.atom_vocab = AtomVocabulary(metal_known, include_hydrogen=keep_hydrogen)
+        self.atom_vocab = AtomVocabulary(
+            metal_known=metal_known,
+            include_hydrogen=keep_hydrogen,
+            aggregate_uncommon=aggregate_uncommon,
+            allow_unknown=allow_unknown
+        )
         self.record_vocab = AtomTypeVocabulary()
 
         self.mask_token = self.atom_vocab.mask_token
