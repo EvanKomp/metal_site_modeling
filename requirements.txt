@@ -9,3 +9,4 @@ torch-geometric
 e3nn
 graphein
 torch-scatter
+transformers

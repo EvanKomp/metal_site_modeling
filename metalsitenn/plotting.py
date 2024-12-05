@@ -19,6 +19,8 @@ from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 
+from metalsitenn.atom_vocabulary import AtomTokenizer
+
 def plot_atoms_and_vectors(
     positions: torch.Tensor, 
     atom_tokens: Union[List[str], torch.Tensor]=None,
@@ -31,6 +33,7 @@ def plot_atoms_and_vectors(
     quiver_multiplier: float=1.0,
     quiver_mask: Optional[torch.Tensor] = None,
     atom_highlight: Optional[torch.Tensor] = None,
+    unhighlight_alpha: float=0.4,
     quiver_color: str = 'green'
 ) -> None:
     """Plot 3D atomic structure with optional vector field for visualizing equivariance.
@@ -56,6 +59,7 @@ def plot_atoms_and_vectors(
         quiver_multiplier: Multiplier for the length of the vectors
         quiver_mask: Optional mask to plot only a subset of the vectors
         atom_highlight: Optional mask to highlight specific atoms
+        unhighlight_alpha: Transparency of unhighlighted atoms
         quiver_color: Color of the vectors
     """
     if ax is None:
@@ -120,7 +124,7 @@ def plot_atoms_and_vectors(
     # Plot atoms with appropriate markers and colors
     for i, pos in enumerate(positions):
         if atom_highlight is not None:
-            alpha = 1.0 if i in atom_highlight else 0.4
+            alpha = 1.0 if i in atom_highlight else unhighlight_alpha
         else:
             alpha = 1.0
             

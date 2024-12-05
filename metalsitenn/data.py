@@ -8,12 +8,16 @@
 import os
 from biopandas.pdb import PandasPdb
 import numpy as np
-from typing import Tuple, List
+from typing import Tuple, List, Dict, Optional
 import re
 import pandas as pd
 
 import torch
-from torch_geometric.data import Data, Batch
+
+import logging
+logger = logging.getLogger(__name__)
+
+
 
 class PDBReader:
     """Reads PDB files to extract atomic coordinates and metadata.
@@ -71,93 +75,149 @@ class PDBReader:
                 yield outs
 
 
-class AtomicSystemCollator:
-    """Collates atomic system data with optional masking and position noising.
-    
+class AtomicSystemBatchCollator:
+    """Processes batches of atomic systems with optional masking and noise.
+
+    Handles HuggingFace dataset batches (dict of lists) and converts to dict of tensors.
+    Optionally applies atom masking and position noise during training.
+
     Args:
-        tokenizer: AtomTokenizer instance for mask token
-        max_radius: Maximum radius for graph construction (Å)
-        mask_rate: Fraction of atoms to mask (default: None)
-        noise_rate: Fraction of positions to add noise to (default: None)  
-        noise_width: Standard deviation of gaussian noise (default: 0.1Å)
+        tokenizer: Tokenizer instance providing mask token and vocabulary
+        mask_rate: Fraction of atoms to mask during training, if None no masking
+        noise_rate: Fraction of positions to add noise, if None no noise
+        zero_noise_in_loss_rate: Additional positions to include in loss but not noise 
+        noise_scale: Standard deviation of gaussian noise (Angstroms)
+        already_tokenized: If True, input is already tokenized, otherwise tokenizes
+        return_original_positions: If True, returns original positions before noise
+
+    Input batch format:
+        {
+            'atoms': List[List[int]], # Atomic number tokens
+            'atom_types': List[List[int]], # ATOM/HETATM tokens  
+            'positions': List[List[float]], # xyz coordinates
+            'id': List[str] # Optional system identifiers
+        }
+
+    Output format:
+        {
+            'atoms': [n_atoms_total] atom tokens, possibly masked
+            'atom_types': [n_atoms_total] record tokens
+            'positions': [n_atoms_total, 3] coordinates
+            'batch_indices': [n_atoms_total] batch indices
+            'mask_mask': [n_atoms] mask of which atoms are masked
+            'atom_labels': [n_atoms] labels for masked atoms
+            'atom_type_labels': [n_atoms] labels for masked atom types
+            'noise_mask': [n_atoms] mask of which atoms are noised, if noising
+            'denoise_vectors': [n_atoms, 3] vectors required to denoise positions, if noising, for computing loss, this vector is scaled.
+            'noise_loss_mask': [n_atoms] mask of which atoms are used for loss, if noising
+            'id': [batch_size] original system IDs if provided
+            any other fields in input batch
+        }
     """
+
     def __init__(
-        self,
-        tokenizer,
-        mask_rate: float = None,
-        noise_rate: float = None,
-        noise_width: float = 0.1
-    ):
-        self.mask_token = tokenizer.mask_token
+            self,
+            tokenizer,
+            mask_rate: Optional[float] = None,
+            noise_rate: Optional[float] = None, 
+            zero_noise_in_loss_rate: Optional[float] = None,
+            noise_scale: float = 1.0,
+            already_tokenized: bool = True,
+            return_original_positions: bool = False
+        ):
+        self.atom_mask_token = tokenizer.atom_mask_token
+        self.type_mask_token = tokenizer.type_mask_token
         self.mask_rate = mask_rate
         self.noise_rate = noise_rate
-        self.noise_width = noise_width
+        self.zero_noise_in_loss_rate = zero_noise_in_loss_rate
+        self.noise_scale = noise_scale
+        self.already_tokenized = already_tokenized
+        self.return_original_positions = return_original_positions
 
-    def __call__(self, batch: List[dict]) -> Batch:
-        """Collate batch of atomic systems with masking and noise.
-        
+
+    def __call__(self, batch: Dict[str, List]) -> Dict[str, torch.Tensor]:
+        """Process a batch of atomic systems.
+
         Args:
-            batch: List of dicts with keys:
-                - atoms: Tensor of atom type indices 
-                - atom_types: Tensor of ATOM/HETATM indices
-                - positions: Tensor of 3D coordinates
-                - label_*: Any label tensors
-        
+            batch: HuggingFace format batch dictionary
+
         Returns:
-            PyG Batch object with:
-                - atoms: Atom type indices (masked if mask_rate > 0)  
-                - atom_types: ATOM/HETATM record indices
-                - pos: Noised positions if noise_rate > 0
-                - original_pos: Original positions if noise applied
-                - edge_index: [2, num_edges] COO format edge indices
-                - batch: Batch assignment for each node
-                - mask_mask: Mask for masked atoms
-                - noise_mask: Mask for noised positions
-                - label_*: Original label tensors
+            Dictionary of processed tensors with optional masking/noise
         """
-        # Create list of Data objects
-        data_list = []
-        for i, d in enumerate(batch):
-            data = Data(
-                atoms=d['atoms'],
-                atom_types=d['atom_types'], 
-                pos=d['positions']
-            )
-            
-            # Add any labels
-            for k, v in d.items():
-                if k.startswith('label_'):
-                    data[k] = v
-                    
-            data_list.append(data)
+        # Track batch sizes for creating index tensor
+        batch_sizes = [len(atoms) for atoms in batch['atoms']]
+        total_atoms = sum(batch_sizes)
+        logger.debug(f"Processing batch with {len(batch_sizes)} systems, {total_atoms} total atoms")
 
-        # Batch the data
-        batch = Batch.from_data_list(data_list)
-        
+        # Create batch index tensor
+        batch_idx = torch.repeat_interleave(
+            torch.arange(len(batch_sizes)), 
+            torch.tensor(batch_sizes)
+        )
+
+        # tokenize if necessary
+        if not self.already_tokenized:
+            batch['atoms'] = [self.tokenizer.encode(x) for x in batch['atoms']]
+            batch['atom_types'] = [self.tokenizer.encode(x) for x in batch['atom_types']]
+
+        # Concatenate and convert to tensors
+        output = {
+            'atoms': torch.cat([torch.tensor(x) for x in batch['atoms']]),
+            'atom_types': torch.cat([torch.tensor(x) for x in batch['atom_types']]),
+            'positions': torch.cat([torch.tensor(x) for x in batch['positions']]),
+            'batch_indices': batch_idx
+        }
+
         # Apply masking
-        if self.mask_rate:
-            n_mask = int(len(batch.atoms) * self.mask_rate)
-            mask_idx = torch.randperm(len(batch.atoms))[:n_mask]
-            batch.atoms[mask_idx] = self.mask_token
-            batch.atom_types[mask_idx] = self.mask_token
-            #conver indexes into a bool mask
-            batch.atom_mask = torch.zeros(len(batch.atoms), dtype=torch.bool)
-            batch.atom_mask[mask_idx] = True
+        if self.mask_rate and self.mask_rate > 0:
+            output['atom_labels'] = output['atoms'].clone()
+            output['atom_type_labels'] = output['atom_types'].clone()
 
-        else:
-            batch.atom_mask = None
+            n_mask = int(total_atoms * self.mask_rate)
+            mask_idx = torch.randperm(total_atoms)[:n_mask]
+            
+            output['atoms'][mask_idx] = self.atom_mask_token
+            output['atom_types'][mask_idx] = self.type_mask_token
+            output['mask_mask'] = torch.zeros(total_atoms, dtype=torch.bool)
+            output['mask_mask'][mask_idx] = True
+            
+            logger.debug(f"Masked {n_mask} atoms")
 
-        # Apply position noise  
-        if self.noise_rate:
-            n_noise = int(len(batch.pos) * self.noise_rate)
-            noise_idx = torch.randperm(len(batch.pos))[:n_noise]
-            batch.original_pos = batch.pos[noise_idx].clone()
-            batch.pos[noise_idx] += torch.randn_like(batch.pos[noise_idx]) * self.noise_width
-            batch.noise_mask = torch.zeros(len(batch.pos), dtype=torch.bool)
-            batch.noise_mask[noise_idx] = True
-        else:
-            batch.noise_mask = None
+        # Apply coordinate noise
+        if self.noise_rate and self.noise_rate > 0:
+            n_noise = int(total_atoms * self.noise_rate)
+            randperm = torch.randperm(total_atoms)
+            noise_idx = randperm[:n_noise]
+            
+            # Additional positions for loss but no noise
+            if self.zero_noise_in_loss_rate:
+                n_zero_noise = int(total_atoms * self.zero_noise_in_loss_rate)
+                zero_noise_idx = randperm[n_noise:n_noise+n_zero_noise]
+                noise_loss_idx = torch.cat([noise_idx, zero_noise_idx])
+            else:
+                noise_loss_idx = noise_idx
 
-        batch.atom_tokens = torch.vstack([batch.atoms, batch.atom_types]).T
 
-        return batch
+            if self.return_original_positions:
+                output['original_positions'] = output['positions'].clone()
+
+            noise_vectors = torch.zeros_like(output['positions'])
+            noise_vectors[noise_idx] = torch.randn(n_noise, 3)
+            # move the atoms by noise times scale
+            # return vectors will not be scaled so model can be trained with low activations
+            output['positions'] = output['positions'] + noise_vectors * self.noise_scale
+            denoise_loss_vectors = noise_vectors * -1
+            output['denoise_vectors'] = denoise_loss_vectors
+            output['noise_loss_mask'] = torch.zeros(total_atoms, dtype=torch.bool)
+            output['noise_loss_mask'][noise_loss_idx] = True
+            output['noise_mask'] = torch.zeros(total_atoms, dtype=torch.bool)
+            output['noise_mask'][noise_idx] = True
+
+            logger.debug(f"Added noise to {n_noise} positions, tracking loss on {len(noise_loss_idx)} positions")
+        
+        # pass through other keys
+        for key, value in batch.items():
+            if key not in output:
+                output[key] = value
+
+        return output

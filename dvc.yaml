@@ -8,3 +8,16 @@ stages:
       - data/site_labels.csv
     metrics:
       - data/metrics/site_label_metrics.json
+
+  1.2_create_dataset:
+    cmd: python pipeline/create_dataset.py
+    deps:
+      - pipeline/1.2_create_dataset.py
+      - data/mf_sites
+    outs:
+      - data/dataset/metal_site_dataset
+    params:
+      - data.model_hydrogens
+      - data.metal_known
+      - data.aggregate_uncommon
+      - data.test_frac

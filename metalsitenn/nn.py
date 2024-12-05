@@ -14,7 +14,7 @@ import torch
 from torch import nn
 from e3nn import o3
 
-from torch_cluster import radius_graph
+from torch_geometric.nn.pool import radius_graph
 from torch_scatter import scatter
 import torch_geometric
 import math
@@ -123,11 +123,12 @@ class GraphAttention(torch.nn.Module):
         irreps_node_output: Output node feature irreps
         fc_neurons: Hidden layer sizes for radial networks
         irreps_head: Feature irreps per attention head
-        num_heads: Number of attention heads
+        num_headss: Number of attention heads
         irreps_pre_attn: Optional irreps before attention
         alpha_drop: Dropout rate for attention weights
         proj_drop: Dropout rate for output projection,
         rescale_degree: Scale output
+        output_attentions: Whether to output attention weights
     """
     def __init__(
         self,
@@ -138,11 +139,12 @@ class GraphAttention(torch.nn.Module):
         irreps_node_output: o3.Irreps,
         fc_neurons: List[int],
         irreps_head: o3.Irreps,
-        num_heads: int,
+        num_headss: int,
         irreps_pre_attn: Optional[o3.Irreps] = None,
         alpha_drop: float = 0.0,
         proj_drop: float = 0.0,
         rescale_degree: bool = False,
+        output_attentions: bool = False
     ):
         super().__init__()
         
@@ -154,19 +156,20 @@ class GraphAttention(torch.nn.Module):
         self.irreps_pre_attn = self.irreps_node_input if irreps_pre_attn is None \
             else o3.Irreps(irreps_pre_attn)
         self.irreps_head = o3.Irreps(irreps_head)
-        self.num_heads = num_heads
+        self.num_headss = num_headss
         self.rescale_degree = rescale_degree
+        self.output_attentions = output_attentions
 
         # Linear projections for node features
         self.message_src_proj = LinearRS(self.irreps_node_input, self.irreps_pre_attn, bias=True)
         self.message_dst_proj = LinearRS(self.irreps_node_input, self.irreps_pre_attn, bias=False)
 
         # Set up attention mechanism
-        irreps_attn_heads = irreps_head * num_heads
+        irreps_attn_heads = irreps_head * num_headss
         irreps_attn_heads = sort_irreps_even_first(irreps_attn_heads)[0].simplify()
         
         mul_alpha = get_mul_0(irreps_attn_heads)  # Number of scalar features
-        mul_alpha_head = mul_alpha // num_heads
+        mul_alpha_head = mul_alpha // num_headss
         irreps_alpha = o3.Irreps(f"{mul_alpha}x0e")
         irreps_attn_all = (irreps_alpha + irreps_attn_heads).simplify()
 
@@ -196,13 +199,13 @@ class GraphAttention(torch.nn.Module):
         )
 
         # Multi-head processing
-        self.score_to_heads = Vec2AttnHeads(o3.Irreps(f"{mul_alpha_head}x0e"), num_heads)
-        self.value_to_heads = Vec2AttnHeads(self.irreps_head, num_heads)
+        self.score_to_heads = Vec2AttnHeads(o3.Irreps(f"{mul_alpha_head}x0e"), num_headss)
+        self.value_to_heads = Vec2AttnHeads(self.irreps_head, num_headss)
         self.score_activation = Activation(o3.Irreps(f"{mul_alpha_head}x0e"), [SmoothLeakyReLU(0.2)])
         self.heads_to_vec = AttnHeads2Vec(irreps_head)
         
         # Learned attention parameters
-        self.attention_dot = torch.nn.Parameter(torch.randn(1, num_heads, mul_alpha_head))
+        self.attention_dot = torch.nn.Parameter(torch.randn(1, num_headss, mul_alpha_head))
         torch_geometric.nn.inits.glorot(self.attention_dot)
 
         # Dropout modules
@@ -283,7 +286,10 @@ class GraphAttention(torch.nn.Module):
         if self.proj_dropout:
             out = self.proj_dropout(out)
 
-        return out
+        if not self.output_attentions:
+            return out
+        else:
+            return out, scores
 
 
 class TransformerBlock(torch.nn.Module):
@@ -307,12 +313,13 @@ class TransformerBlock(torch.nn.Module):
             recommended to have this be of the same order as the output but smaller by a factor
             of the number of heads
         fc_neurons: Hidden layer sizes for radial networks
-        num_heads: Number of attention heads
+        num_headss: Number of attention heads
         rescale_degree: Scale output
         alpha_drop: Dropout rate for attention weights
         proj_drop: Dropout rate for output projection,
         drop_path_rate: Dropout rate for skip connections
         norm_layer: Layer normalization
+        output_attentions: Whether to output attention weights
     """
 
     def __init__(
@@ -325,12 +332,13 @@ class TransformerBlock(torch.nn.Module):
         irreps_mid: o3.Irreps=None,
         irreps_head: o3.Irreps=None,
         fc_neurons: List[int]=[32, 32], # for sending messages
-        num_heads: int=4,
+        num_headss: int=4,
         rescale_degree: bool=False,
         alpha_drop: float=0.0,
         proj_drop: float=0.0,
         drop_path_rate: float=0.0,
         norm_layer: Optional[str]='layer',
+        output_attentions: bool=False
     ):
         super().__init__()
         self.irreps_node_input = o3.Irreps(irreps_node_input)
@@ -340,11 +348,12 @@ class TransformerBlock(torch.nn.Module):
         self.irreps_node_output = o3.Irreps(irreps_node_output)
         self.irreps_mid = self.irreps_node_output if irreps_mid is None else o3.Irreps(irreps_mid)
         self.irreps_head = self.irreps_node_output if irreps_head is None else o3.Irreps(irreps_head)
-        self.num_heads = num_heads
+        self.num_headss = num_headss
         self.rescale_degree = rescale_degree
         self.alpha_drop = alpha_drop
         self.proj_drop = proj_drop
         self.drop_path_rate = drop_path_rate
+        self.output_attentions = output_attentions
 
         # Layer norm
         self.norm_layer1 = get_norm_layer(norm_layer)(self.irreps_node_input)
@@ -359,10 +368,11 @@ class TransformerBlock(torch.nn.Module):
             irreps_node_output=self.irreps_node_input, # output is same as input, so is internal state since it was not passed
             irreps_head=self.irreps_head,
             fc_neurons=fc_neurons,
-            num_heads=self.num_heads,
+            num_headss=self.num_headss,
             alpha_drop=self.alpha_drop,
             proj_drop=self.proj_drop,
-            rescale_degree=self.rescale_degree
+            rescale_degree=self.rescale_degree,
+            output_attentions=self.output_attentions
         )
 
         self.drop_path = GraphDropPath(drop_path_rate) if drop_path_rate > 0.0 else None
@@ -428,6 +438,8 @@ class TransformerBlock(torch.nn.Module):
             edge_embedding,
             batch
         )
+        if self.output_attentions:
+            node_hidden_state, attentions = node_hidden_state
 
         # drop path
         if self.drop_path:
@@ -460,10 +472,14 @@ class TransformerBlock(torch.nn.Module):
 
         # skip connection on output
         node_output = node_output + node_hidden_state
-        return node_output
+        
+        if self.output_attentions:
+            return node_output, attentions
+        else:
+            return node_output
     
 
-class MetalSiteFoundationalModel(torch.nn.Module):
+class _MetalSiteFoundationalModel(torch.nn.Module):
     """E3-equivariant transformer model for learning protein metal site representations.
 
     Processes protein structure graphs using SO(3)-equivariant attention mechanisms. Takes atomic coordinates and identities as input 
@@ -479,7 +495,7 @@ class MetalSiteFoundationalModel(torch.nn.Module):
         number_basis: Number of radial basis functions. Default: 32 
         fc_neurons: Hidden layer sizes for radial networks. Default: [32, 32]
         irreps_head: Feature irreps per attention head. Default: 32 scalars, 16 vectors, 8 l=2
-        num_head: Number of attention heads. Default: 4
+        num_heads: Number of attention heads. Default: 4
         num_layers: Number of transformer blocks. Default: 2
         alpha_drop: Dropout rate for attention weights. Default: 0.0
         proj_drop: Dropout rate for projections. Default: 0.0
@@ -505,13 +521,15 @@ class MetalSiteFoundationalModel(torch.nn.Module):
         number_basis: int=32,
         fc_neurons: List[int]=[32, 32],
         irreps_head: o3.Irreps=o3.Irreps('32x0e+16x1o+8x2e'),
-        num_head: int=4,
+        num_heads: int=4,
         num_layers: int=2,
         alpha_drop: float=0.0,
         proj_drop: float=0.0,
         out_drop: float=0.0,
         drop_path_rate: float=0.0,
-        avg_aggregate_num: int=12
+        avg_aggregate_num: int=12,
+        output_attentions: bool=False,
+        output_hidden_states: bool=False,
     ):
         super().__init__()
 
@@ -524,13 +542,15 @@ class MetalSiteFoundationalModel(torch.nn.Module):
         self.number_basis = number_basis
         self.fc_neurons = fc_neurons
         self.irreps_head = o3.Irreps(irreps_head)
-        self.num_heads = num_head
+        self.num_headss = num_heads
         self.num_layers = num_layers
         self.alpha_drop = alpha_drop
         self.proj_drop = proj_drop
         self.out_drop = out_drop
         self.drop_path_rate = drop_path_rate
         self.avg_aggregate_num = avg_aggregate_num
+        self.output_attentions = output_attentions
+        self.output_hidden_states = output_hidden_states
 
         self.irreps_node_attr = o3.Irreps(f"{self.tokenizer.oh_size}x0e")
         self.irreps_edge_features = o3.Irreps(f"{number_basis}x0e")
@@ -575,10 +595,11 @@ class MetalSiteFoundationalModel(torch.nn.Module):
                 irreps_edge_attr=self.irreps_edge_attr,
                 irreps_edge_features=self.irreps_edge_features,
                 irreps_node_output=irreps_output,
-                num_heads=self.num_heads,
+                num_headss=self.num_headss,
                 drop_path_rate=self.drop_path_rate,
                 alpha_drop=self.alpha_drop,
-                proj_drop=self.proj_drop
+                proj_drop=self.proj_drop,
+                output_attentions=self.output_attentions
             )
             self.blocks.append(block)
 
@@ -594,7 +615,7 @@ class MetalSiteFoundationalModel(torch.nn.Module):
 
     def forward(
             self, atom_identifiers, positions, batch_indices, **kwargs):
-        
+
         # get edges
         edge_src, edge_dst = radius_graph(
             positions, r=self.max_radius, batch=batch_indices, loop=False
@@ -614,15 +635,28 @@ class MetalSiteFoundationalModel(torch.nn.Module):
         node_hidden_state = node_features + edge_degree_embedding
 
         # run through transformer blocks
+        hidden_states = []
         for block in self.blocks:
             node_hidden_state = block(
                 node_hidden_state, node_attrs, edge_src, edge_dst, edge_attributes, edge_features, batch_indices
             )
+            if self.output_attentions:
+                node_hidden_state, attentions = node_hidden_state
+                hidden_states.append(attentions)
 
-        return node_hidden_state, node_attrs
+        outs = {}
+        outs['node_hidden_state'] = node_hidden_state
+        outs['node_attrs'] = node_attrs
+        if self.output_hidden_states:
+            outs['hidden_states'] = hidden_states
+
+        if self.output_attentions:
+            outs['attentions'] = hidden_states
+
+        return outs
     
 
-class MetalSiteNodeHead(torch.nn.Module):
+class _MetalSiteNodeHead(torch.nn.Module):
     """Output logits over vocab and a vector.
     
     Note that there is no scaling factor applied here, thus this module should be trained
@@ -679,42 +713,42 @@ class MetalSiteNodeHead(torch.nn.Module):
         return atom_scalars, atom_type_scalars, vectors
 
 
-class MetalSiteNodeModel(torch.nn.Module):
-    """Combines foundational model and head for a full model that can be trained simultaneously for atom demasking and
-    position denoising."""
+# class MetalSiteNodeModel(torch.nn.Module):
+#     """Combines foundational model and head for a full model that can be trained simultaneously for atom demasking and
+#     position denoising."""
     
-    def __init__(
-        self,
-        node_model: MetalSiteFoundationalModel,
-        node_head: MetalSiteNodeHead
-    ):
-        super().__init__()
-        self.node_model = node_model
-        self.node_head = node_head
+#     def __init__(
+#         self,
+#         node_model: MetalSiteFoundationalModel,
+#         node_head: MetalSiteNodeHead
+#     ):
+#         super().__init__()
+#         self.node_model = node_model
+#         self.node_head = node_head
 
-    def forward(
-        self,
-        atom_identifiers, positions, batch_indices, **kwargs
-    ):
-        node_hidden_state, node_attrs = self.node_model(
-            atom_identifiers, positions, batch_indices
-        )
-        atom_scalars, atom_type_scalars, vectors = self.node_head(node_hidden_state, node_attrs)
-        return atom_scalars, atom_type_scalars, vectors
+#     def forward(
+#         self,
+#         atom_identifiers, positions, batch_indices, **kwargs
+#     ):
+#         node_hidden_state, node_attrs = self.node_model(
+#             atom_identifiers, positions, batch_indices
+#         )
+#         atom_scalars, atom_type_scalars, vectors = self.node_head(node_hidden_state, node_attrs)
+#         return atom_scalars, atom_type_scalars, vectors
     
 
-def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple[o3.Irreps, o3.Irreps]:
+def get_irreps(l: int, scale: int, decay: float, num_headss: int = None) -> tuple[o3.Irreps, o3.Irreps]:
     """Generate scalable irreps for network features and attention heads.
     
     Args:
         l: Maximum order of irreps
         scale: Base multiplicity for l=0 irreps
         decay: Factor to reduce multiplicity for each l (decay^l)
-        num_heads: If provided, returns attention head irreps with multiplicities divided by num_heads
+        num_headss: If provided, returns attention head irreps with multiplicities divided by num_headss
     
     Returns:
         hidden_irreps: Full irreps for hidden features
-        head_irreps: Irreps for attention heads if num_heads provided, else None
+        head_irreps: Irreps for attention heads if num_headss provided, else None
     """
     irreps = []
     head_irreps = []
@@ -732,8 +766,8 @@ def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple
         ])
         
         # Calculate head multiplicities if requested
-        if num_heads is not None:
-            head_mult = math.ceil(mult / num_heads)
+        if num_headss is not None:
+            head_mult = math.ceil(mult / num_headss)
             if head_mult > 0:
                 head_irreps.extend([
                     (head_mult, (i, 1)),
@@ -741,6 +775,6 @@ def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple
                 ])
     
     hidden_irreps = o3.Irreps(irreps)
-    head_irreps = o3.Irreps(head_irreps) if num_heads is not None else None
+    head_irreps = o3.Irreps(head_irreps) if num_headss is not None else None
     
     return hidden_irreps, head_irreps

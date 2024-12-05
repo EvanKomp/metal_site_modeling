@@ -11,6 +11,7 @@ from typing import List, Union, Dict, Set
 import torch
 import numpy as np
 from .constants import (METAL_IONS, RECORD_TYPES, COMMON_PROTEIN_ATOMS, UNCOMMON_PROTEIN_ATOMS)
+import copy
 
 import logging
 logger = logging.getLogger(__name__)
@@ -63,8 +64,11 @@ class BaseVocabulary:
     def decode(self, tokens: Union[int, torch.Tensor]) -> Union[str, List[str]]:
         """Convert token(s) to string(s)."""
         if isinstance(tokens, (int, np.integer)):
-            return self.itos.get(tokens, '<MASK>')
-        return [self.itos.get(t.item(), '<MASK>') for t in tokens]
+            return self.itos.get(tokens, None)
+        elif isinstance(tokens, torch.Tensor):
+            return [self.itos.get(t.item(), None) for t in tokens]
+        elif hasattr(tokens, '__iter__'):
+            return [self.itos.get(t, None) for t in tokens]
 
 class AtomVocabulary(BaseVocabulary):
     """Maps atomic identities to integer tokens.
@@ -90,7 +94,7 @@ class AtomVocabulary(BaseVocabulary):
     ): 
         
         # Filter hydrogen if not included
-        vocab = COMMON_PROTEIN_ATOMS
+        vocab = copy.copy(COMMON_PROTEIN_ATOMS)
         if not include_hydrogen:
             vocab.remove('H')
             vocab.remove('D')
@@ -156,7 +160,8 @@ class AtomTokenizer:
         )
         self.record_vocab = AtomTypeVocabulary()
 
-        self.mask_token = self.atom_vocab.mask_token
+        self.atom_mask_token = self.atom_vocab.mask_token
+        self.type_mask_token = self.record_vocab.mask_token
 
         self.oh_size = self.atom_vocab.vocab_size + self.record_vocab.vocab_size
 
@@ -176,16 +181,25 @@ class AtomTokenizer:
             'atom_types': [self.record_vocab.encode(types) for types in atom_types]
         }
     
-    def decode(self, tokens: Dict[str, torch.Tensor]) -> Dict[str, List[str]]:
+    def _decode_atoms(self, atoms: List[int]) -> List[str]:
+        """Converts integer tokens back to atom names."""
+        return self.atom_vocab.decode(atoms)
+    
+    def _decode_records(self, records: List[int]) -> List[str]:
+        """Converts integer tokens back to record types."""
+        return self.record_vocab.decode(records)
+
+    def decode(self, atoms: Union[int, torch.Tensor]=None, atom_types: Union[int, torch.Tensor]=None) -> Dict[str, List[str]]:
         """Converts integer tokens back to atom names and record types.
         
         Args:
-            tokens: Dictionary with keys 'atoms' and 'records' containing tokenized data
-        
+            atoms: Integer tensor of atom tokens
+            atom_types: Integer tensor of record type tokens
+
         Returns:
             Dictionary with keys 'atoms' and 'records' containing decoded data
         """
         return {
-            'atoms': [self.atom_vocab.decode(t) for t in tokens['atoms']],
-            'atom_types': [self.record_vocab.decode(t) for t in tokens['atom_types']]
+            'atoms': self._decode_atoms(atoms) if atoms is not None else None,
+            'atom_types': self._decode_records(atom_types) if atom_types is not None else None
         }
