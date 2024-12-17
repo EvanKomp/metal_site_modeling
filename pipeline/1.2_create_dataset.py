@@ -53,7 +53,7 @@ def data_generator(
     """
     for i, example in enumerate(reader.read_dir(data_dir)):
         # Convert numpy arrays to lists for HF dataset
-        example['positions'] = example['positions'].tolist()
+        example['pos'] = example['pos'].tolist()
         yield example
         if debug_sample and i >= debug_sample:
             break

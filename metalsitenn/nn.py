@@ -9,7 +9,7 @@ Network adapted fron e3nn and equiformer.
 https://github.com/e3nn/e3nn
 https://github.com/atomicarchitects/equiformer/tree/master
 '''
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple, Union
 import torch
 from torch import nn
 from e3nn import o3
@@ -36,24 +36,25 @@ from equiformer.nets.graph_attention_transformer import (
     get_norm_layer
 )
 
-from metalsitenn.atom_vocabulary import AtomTokenizer
 
-class AtomEmbedding(nn.Module):
+class AtomEmbeddingLayer(nn.Module):
     """Embeds categorical and continuous atomic features into irreps and raw encodings.
     
     Args:
-        categorical_features: List of (num_categories, embedding_dim) tuples
-        continuous_features: List of feature dimensions 
-        irreps_out: Output irreps string
+        categorical_features: List[(num_categories, embedding_dim)] for each categorical input
+        continuous_features: Optional[List[int]] dimensions of continuous features 
+        irreps_out: o3.Irreps string for output irreps
         
     Returns:
-        Tuple of (embeddings: irreps_out, raw: a one hot encoding)
+        Tuple[torch.Tensor, torch.Tensor]:
+            - node_feats: [num_atoms, irreps_out.dim] tensor of irrep embeddings  
+            - node_attr: [num_atoms, sum(cat_sizes)] one-hot node attributes
     """
     def __init__(
         self,
         categorical_features: List[tuple[int, int]], 
-        continuous_features: List[int]=None,
-        irreps_out: str = o3.Irreps.spherical_harmonics(2)
+        continuous_features: Optional[List[int]] = None,
+        irreps_out: o3.Irreps = o3.Irreps.spherical_harmonics(2)
     ):
         super().__init__()
         
@@ -74,72 +75,75 @@ class AtomEmbedding(nn.Module):
 
     def forward(
         self,
-        categorical_features: torch.Tensor,
-        continuous_features: Optional[torch.Tensor] = None
-    ) -> Dict[str, torch.Tensor]:
+        categorical_feats: torch.Tensor,
+        continuous_feats: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            categorical_features: [num_atoms, num_categorical] integer tensor
-            continuous_features: [num_atoms, sum(continuous_features)] tensor
+            categorical_feats: [num_atoms, num_categorical] integer tensor
+            continuous_feats: Optional[num_atoms, sum(continuous_features)] tensor
+            
+        Returns:
+            node_feats: [num_atoms, irreps_out.dim] tensor of irrep embeddings
+            node_attr: [num_atoms, sum(cat_sizes)] one-hot node attributes
         """
         # Split and embed categorical features
         cat_feats = [
-            embed(categorical_features[:,i]) 
+            embed(categorical_feats[:,i]) 
             for i, embed in enumerate(self.categorical_embeddings)
         ]
         
         # Generate one-hot encodings 
         one_hot = [
-            nn.functional.one_hot(categorical_features[:,i], num_classes=num_cats)
+            nn.functional.one_hot(categorical_feats[:,i], num_classes=num_cats)
             for i, num_cats in enumerate(self.num_categories)
         ]
         
         # Combine features
-        if continuous_features is not None:
-            embedded = torch.cat([*cat_feats, continuous_features], dim=-1)
-            raw = torch.cat([*one_hot, continuous_features], dim=-1) 
+        if continuous_feats is not None:
+            embedded = torch.cat([*cat_feats, continuous_feats], dim=-1)
+            node_attr = torch.cat([*one_hot, continuous_feats], dim=-1) 
         else:
             embedded = torch.cat(cat_feats, dim=-1)
-            raw = torch.cat(one_hot, dim=-1)
+            node_attr = torch.cat(one_hot, dim=-1)
             
-        return self.project(embedded), raw.float()
+        node_feats = self.project(embedded)
+        return node_feats, node_attr.float()
     
 
-class GraphAttention(torch.nn.Module):
+class GraphAttentionLayer(torch.nn.Module):
     """E3 equivariant graph attention layer with nonlinear edge messages.
 
-    Original implementation discards node attributes. Here they are combined with edge distance embedding to
-    help determine tensor proruct weights.
-
-    Node features are used to compute messages, queries, and keys. Node attributes and 
-    edge embeddings together determine the weights for tensor products. This ensures
-    node attributes only influence the strength of interactions while maintaining
-    equivariance through the node features.
-
+    Original implementation disregards node attributes in the attention mechanism,
+    here they are cated to the edge features (radial distance embeddings) for 
+    determining tensor product weights, which are used to compute vectors that are projected
+    into values and attention scores
+    
     Args:
-        irreps_node_input: Input node feature irreps
+        irreps_node_feats: Input node feature irreps
         irreps_node_attr: Node attribute irreps (invariant scalars)  
+        irreps_edge_input: Edge input feature irreps (invariant scalars)
         irreps_edge_attr: Edge geometric irreps (spherical harmonics)
         irreps_node_output: Output node feature irreps
         fc_neurons: Hidden layer sizes for radial networks
         irreps_head: Feature irreps per attention head
-        num_headss: Number of attention heads
+        num_heads: Number of attention heads
         irreps_pre_attn: Optional irreps before attention
         alpha_drop: Dropout rate for attention weights
-        proj_drop: Dropout rate for output projection,
-        rescale_degree: Scale output
+        proj_drop: Dropout rate for output projection
+        rescale_degree: Scale output by node degree
         output_attentions: Whether to output attention weights
     """
     def __init__(
         self,
-        irreps_node_input: o3.Irreps,
+        irreps_node_feats: o3.Irreps,
         irreps_node_attr: o3.Irreps,
         irreps_edge_input: o3.Irreps,
         irreps_edge_attr: o3.Irreps,
         irreps_node_output: o3.Irreps,
         fc_neurons: List[int],
         irreps_head: o3.Irreps,
-        num_headss: int,
+        num_heads: int,
         irreps_pre_attn: Optional[o3.Irreps] = None,
         alpha_drop: float = 0.0,
         proj_drop: float = 0.0,
@@ -148,32 +152,31 @@ class GraphAttention(torch.nn.Module):
     ):
         super().__init__()
         
-        self.irreps_node_input = o3.Irreps(irreps_node_input)
+        self.irreps_node_feats = o3.Irreps(irreps_node_feats)
         self.irreps_node_attr = o3.Irreps(irreps_node_attr)
         self.irreps_edge_input = o3.Irreps(irreps_edge_input)
         self.irreps_edge_attr = o3.Irreps(irreps_edge_attr) 
         self.irreps_node_output = o3.Irreps(irreps_node_output)
-        self.irreps_pre_attn = self.irreps_node_input if irreps_pre_attn is None \
+        self.irreps_pre_attn = self.irreps_node_feats if irreps_pre_attn is None \
             else o3.Irreps(irreps_pre_attn)
         self.irreps_head = o3.Irreps(irreps_head)
-        self.num_headss = num_headss
+        self.num_heads = num_heads
         self.rescale_degree = rescale_degree
         self.output_attentions = output_attentions
 
         # Linear projections for node features
-        self.message_src_proj = LinearRS(self.irreps_node_input, self.irreps_pre_attn, bias=True)
-        self.message_dst_proj = LinearRS(self.irreps_node_input, self.irreps_pre_attn, bias=False)
+        self.message_src_proj = LinearRS(self.irreps_node_feats, self.irreps_pre_attn, bias=True)
+        self.message_dst_proj = LinearRS(self.irreps_node_feats, self.irreps_pre_attn, bias=False)
 
         # Set up attention mechanism
-        irreps_attn_heads = irreps_head * num_headss
+        irreps_attn_heads = irreps_head * num_heads
         irreps_attn_heads = sort_irreps_even_first(irreps_attn_heads)[0].simplify()
         
         mul_alpha = get_mul_0(irreps_attn_heads)  # Number of scalar features
-        mul_alpha_head = mul_alpha // num_headss
+        mul_alpha_head = mul_alpha // num_heads
         irreps_alpha = o3.Irreps(f"{mul_alpha}x0e")
-        irreps_attn_all = (irreps_alpha + irreps_attn_heads).simplify()
 
-        # Edge message network - note fc_neurons processes concatenated edge_embedding + node_attr
+        # Edge message network
         incoming_dims = 2 * self.irreps_node_attr.dim + self.irreps_edge_input.dim
         fc_neurons = [incoming_dims] + fc_neurons 
         self.edge_message_net = SeparableFCTP(
@@ -199,13 +202,13 @@ class GraphAttention(torch.nn.Module):
         )
 
         # Multi-head processing
-        self.score_to_heads = Vec2AttnHeads(o3.Irreps(f"{mul_alpha_head}x0e"), num_headss)
-        self.value_to_heads = Vec2AttnHeads(self.irreps_head, num_headss)
+        self.score_to_heads = Vec2AttnHeads(o3.Irreps(f"{mul_alpha_head}x0e"), num_heads)
+        self.value_to_heads = Vec2AttnHeads(self.irreps_head, num_heads)
         self.score_activation = Activation(o3.Irreps(f"{mul_alpha_head}x0e"), [SmoothLeakyReLU(0.2)])
         self.heads_to_vec = AttnHeads2Vec(irreps_head)
         
         # Learned attention parameters
-        self.attention_dot = torch.nn.Parameter(torch.randn(1, num_headss, mul_alpha_head))
+        self.attention_dot = torch.nn.Parameter(torch.randn(1, num_heads, mul_alpha_head))
         torch_geometric.nn.inits.glorot(self.attention_dot)
 
         # Dropout modules
@@ -216,41 +219,41 @@ class GraphAttention(torch.nn.Module):
 
     def forward(
         self,
-        node_input: torch.Tensor,
+        node_feats: torch.Tensor,
         node_attr: torch.Tensor, 
         edge_src: torch.Tensor,
         edge_dst: torch.Tensor,
         edge_attr: torch.Tensor,
         edge_embedding: torch.Tensor,
-        batch: Optional[torch.Tensor] = None,
-        **kwargs
-    ) -> torch.Tensor:
+        batch_idx: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass.
         
         Args:
-            node_input: Node features of shape [num_nodes, irreps_node_input.dim]
-            node_attr: Node attributes of shape [num_nodes, irreps_node_attr.dim] 
-            edge_src: Edge source indices of shape [num_edges]
-            edge_dst: Edge destination indices of shape [num_edges]
-            edge_attr: Edge attributes (geometric) of shape [num_edges, irreps_edge_attr.dim]
-            edge_embedding: Edge radial features of shape [num_edges, num_basis]
-            batch: Optional batch indices of shape [num_nodes]
+            node_feats: [num_nodes, irreps_node_feats.dim] Node features 
+            node_attr: [num_nodes, irreps_node_attr.dim] Node attributes
+            edge_src: [num_edges] Edge source indices
+            edge_dst: [num_edges] Edge destination indices  
+            edge_attr: [num_edges, irreps_edge_attr.dim] Edge attributes
+            edge_embedding: [num_edges, num_basis] Edge embeddings
+            batch_idx: Optional [num_nodes] batch indices
             
         Returns:
-            Updated node features of shape [num_nodes, irreps_node_output.dim]
+            node_feats: [num_nodes, irreps_node_output.dim] Updated features
+            attention_weights: Optional attention scores if output_attentions=True
         """
         # Process node features into messages
-        message_src = self.message_src_proj(node_input)
-        message_dst = self.message_dst_proj(node_input)
+        message_src = self.message_src_proj(node_feats)
+        message_dst = self.message_dst_proj(node_feats)
         message = message_src[edge_src] + message_dst[edge_dst]
 
-        # Combine edge embeddings with source/dest node attributes for tensor product weights
+        # Combine edge embeddings with source/dest node attributes 
         src_attr = node_attr[edge_src]
         dst_attr = node_attr[edge_dst] 
-        weight_features = torch.cat([edge_embedding, src_attr, dst_attr], dim=-1)
+        weight_feats = torch.cat([edge_embedding, src_attr, dst_attr], dim=-1)
 
-        # Compute messages using weights determined by combined attributes
-        weight = self.edge_message_net.dtp_rad(weight_features) 
+        # Compute messages using weights from combined attributes
+        weight = self.edge_message_net.dtp_rad(weight_feats) 
         message = self.edge_message_net.dtp(message, edge_attr, weight)
 
         # Extract attention scores and values
@@ -259,7 +262,7 @@ class GraphAttention(torch.nn.Module):
         
         value = self.edge_message_net.lin(message) 
         value = self.edge_message_net.gate(value)
-        value = self.value_net(value, edge_attr=edge_attr, edge_scalars=weight_features)
+        value = self.value_net(value, edge_attr=edge_attr, edge_scalars=weight_feats)
         value = self.value_to_heads(value)
 
         # Compute attention weights
@@ -273,12 +276,12 @@ class GraphAttention(torch.nn.Module):
 
         # Apply attention and aggregate
         out = value * scores
-        out = scatter(out, edge_dst, dim=0, dim_size=node_input.shape[0])
+        out = scatter(out, edge_dst, dim=0, dim_size=node_feats.shape[0])
         out = self.heads_to_vec(out)
 
         if self.rescale_degree:
             degree = torch_geometric.utils.degree(
-                edge_dst, num_nodes=node_input.shape[0], dtype=node_input.dtype)
+                edge_dst, num_nodes=node_feats.shape[0], dtype=node_feats.dtype)
             out = out * degree.view(-1, 1)
 
         # Final projection
@@ -292,7 +295,7 @@ class GraphAttention(torch.nn.Module):
             return out, scores
 
 
-class TransformerBlock(torch.nn.Module):
+class TransformerBlockLayer(torch.nn.Module):
     """E3-equivariant transformer block with attention and feed-forward networks.
 
     First, node features are layer normed.
@@ -302,37 +305,36 @@ class TransformerBlock(torch.nn.Module):
     Ouputs are layer normed.
     A skip connection from before the feed-forward network is added to the output.
 
+    E3-equivariant transformer block with attention and feed-forward networks.
+    
     Args:
-        irreps_node_input: Input node feature irreps
+        irreps_node_feats: Input node feature irreps
         irreps_node_attr: Node attribute irreps (invariant scalars)  
         irreps_edge_attr: Edge geometric irreps (spherical harmonics)
-        irreps_edge_features: Edge radial features irreps (invariant scalars)
+        irreps_edge_features: Edge radial features irreps
         irreps_node_output: Output node feature irreps
-        irreps_mid: Intermediate node feature irreps, defaults to output
+        irreps_mid: Optional intermediate irreps, defaults to output
         irreps_head: Feature irreps per attention head, defaults to output
-            recommended to have this be of the same order as the output but smaller by a factor
-            of the number of heads
-        fc_neurons: Hidden layer sizes for radial networks
-        num_headss: Number of attention heads
-        rescale_degree: Scale output
-        alpha_drop: Dropout rate for attention weights
-        proj_drop: Dropout rate for output projection,
-        drop_path_rate: Dropout rate for skip connections
-        norm_layer: Layer normalization
+        fc_neurons: Hidden layer sizes for attention messages
+        num_heads: Number of attention heads
+        rescale_degree: Scale output by node degree
+        alpha_drop: Attention dropout rate
+        proj_drop: Projection dropout rate
+        drop_path_rate: Skip connection dropout rate
+        norm_layer: Layer normalization type
         output_attentions: Whether to output attention weights
     """
-
     def __init__(
         self,
-        irreps_node_input: o3.Irreps,
+        irreps_node_feats: o3.Irreps,
         irreps_node_attr: o3.Irreps,
         irreps_edge_attr: o3.Irreps,
         irreps_edge_features: o3.Irreps,
         irreps_node_output: o3.Irreps,
-        irreps_mid: o3.Irreps=None,
-        irreps_head: o3.Irreps=None,
-        fc_neurons: List[int]=[32, 32], # for sending messages
-        num_headss: int=4,
+        irreps_mid: Optional[o3.Irreps]=None,
+        irreps_head: Optional[o3.Irreps]=None,
+        fc_neurons: List[int]=[32, 32],
+        num_heads: int=4,
         rescale_degree: bool=False,
         alpha_drop: float=0.0,
         proj_drop: float=0.0,
@@ -341,14 +343,14 @@ class TransformerBlock(torch.nn.Module):
         output_attentions: bool=False
     ):
         super().__init__()
-        self.irreps_node_input = o3.Irreps(irreps_node_input)
+        self.irreps_node_feats = o3.Irreps(irreps_node_feats)
         self.irreps_node_attr = o3.Irreps(irreps_node_attr)
         self.irreps_edge_attr = o3.Irreps(irreps_edge_attr)
         self.irreps_edge_features = o3.Irreps(irreps_edge_features)
         self.irreps_node_output = o3.Irreps(irreps_node_output)
         self.irreps_mid = self.irreps_node_output if irreps_mid is None else o3.Irreps(irreps_mid)
         self.irreps_head = self.irreps_node_output if irreps_head is None else o3.Irreps(irreps_head)
-        self.num_headss = num_headss
+        self.num_heads = num_heads
         self.rescale_degree = rescale_degree
         self.alpha_drop = alpha_drop
         self.proj_drop = proj_drop
@@ -356,19 +358,19 @@ class TransformerBlock(torch.nn.Module):
         self.output_attentions = output_attentions
 
         # Layer norm
-        self.norm_layer1 = get_norm_layer(norm_layer)(self.irreps_node_input)
+        self.norm_layer1 = get_norm_layer(norm_layer)(self.irreps_node_feats)
         self.norm_layer2 = get_norm_layer(norm_layer)(self.irreps_node_output)
 
         # graph attention
-        self.graph_attention = GraphAttention(
-            irreps_node_input=self.irreps_node_input,
+        self.graph_attention = GraphAttentionLayer(
+            irreps_node_feats=self.irreps_node_feats,
             irreps_node_attr=self.irreps_node_attr,
             irreps_edge_attr=self.irreps_edge_attr,
             irreps_edge_input=self.irreps_edge_features,
-            irreps_node_output=self.irreps_node_input, # output is same as input, so is internal state since it was not passed
+            irreps_node_output=self.irreps_node_feats,
             irreps_head=self.irreps_head,
             fc_neurons=fc_neurons,
-            num_headss=self.num_headss,
+            num_heads=self.num_heads,
             alpha_drop=self.alpha_drop,
             proj_drop=self.proj_drop,
             rescale_degree=self.rescale_degree,
@@ -387,219 +389,205 @@ class TransformerBlock(torch.nn.Module):
         )
 
         # skip attention mechanism
-        if self.irreps_node_input == self.irreps_node_output:
+        if self.irreps_node_feats == self.irreps_node_output:
             self.skip_connection = None
         else:
             self.skip_connection = FeedForwardNetwork(
-                irreps_node_input=self.irreps_node_input,
+                irreps_node_feats=self.irreps_node_feats,
                 irreps_node_attr=self.irreps_node_attr,
                 irreps_node_output=self.irreps_node_output,
                 irreps_mlp_mid=self.irreps_mid,
             )
 
-        # ffn also skipped but proper irreps already met
-
     def forward(
         self,
-        node_input: torch.Tensor,
+        node_feats: torch.Tensor,
         node_attr: torch.Tensor,
         edge_src: torch.Tensor,
         edge_dst: torch.Tensor,
         edge_attr: torch.Tensor,
         edge_embedding: torch.Tensor,
-        batch: Optional[torch.Tensor]=None,
-        **kwargs
-    ) -> torch.Tensor:
+        batch_idx: Optional[torch.Tensor]=None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """Forward pass.
         
         Args:
-            node_input: Node features of shape [num_nodes, irreps_node_input.dim]
-            node_attr: Node attributes of shape [num_nodes, irreps_node_attr.dim] 
-            edge_src: Edge source indices of shape [num_edges]
-            edge_dst: Edge destination indices of shape [num_edges]
-            edge_attr: Edge attributes (geometric) of shape [num_edges, irreps_edge_attr.dim]
-            edge_embedding: Edge radial features of shape [num_edges, num_basis]
-            batch: Optional batch indices of shape [num_nodes]
+            node_feats: [num_nodes, irreps_node_feats.dim] Node features 
+            node_attr: [num_nodes, irreps_node_attr.dim] Node attributes
+            edge_src: [num_edges] Edge source indices
+            edge_dst: [num_edges] Edge destination indices
+            edge_attr: [num_edges, irreps_edge_attr.dim] Edge attributes
+            edge_embedding: [num_edges, num_basis] Edge embeddings
+            batch_idx: Optional [num_nodes] batch indices
             
         Returns:
-            Updated node features of shape [num_nodes, irreps_node_output.dim]
+            node_feats: [num_nodes, irreps_node_output.dim] Updated features
+            attention_weights: Optional attention scores if output_attentions=True
         """
         # Layer norm
-        node_start = node_input
-        node_input = self.norm_layer1(node_input, batch=batch)
+        node_feats_input = node_feats
+        node_feats = self.norm_layer1(node_feats, batch=batch_idx)
 
         # Attention mechanism
-        node_hidden_state = self.graph_attention(
-            node_input,
+        node_feats_hidden = self.graph_attention(
+            node_feats,
             node_attr,
             edge_src,
             edge_dst,
             edge_attr,
             edge_embedding,
-            batch
+            batch_idx
         )
         if self.output_attentions:
-            node_hidden_state, attentions = node_hidden_state
+            node_feats_hidden, attentions = node_feats_hidden
 
         # drop path
         if self.drop_path:
-            node_hidden_state = self.drop_path(node_hidden_state, batch)
+            node_feats_hidden = self.drop_path(node_feats_hidden, batch_idx)
 
         # skip connection on attention
         if self.skip_connection is None:
-            node_hidden_state = node_hidden_state + node_start
+            node_feats_hidden = node_feats_hidden + node_feats_input
         else:
             node_skip = self.skip_connection(
-                node_start,
+                node_feats_input,
                 node_attr,
                 edge_src,
                 edge_dst,
                 edge_attr,
                 edge_embedding,
-                batch
+                batch_idx
             )
-            node_hidden_state = node_hidden_state + node_skip
+            node_feats_hidden = node_feats_hidden + node_skip
 
-        # We will also send post attention to skip
-        node_output = node_hidden_state
+        # Store for second skip connection
+        node_feats_output = node_feats_hidden
 
         # output projection
-        node_hidden_state = self.norm_layer2(node_hidden_state, batch=batch)
-        node_hidden_state = self.head(
-            node_hidden_state,
+        node_feats_hidden = self.norm_layer2(node_feats_hidden, batch=batch_idx)
+        node_feats_hidden = self.head(
+            node_feats_hidden,
             node_attr,
         )
 
         # skip connection on output
-        node_output = node_output + node_hidden_state
+        node_feats_output = node_feats_output + node_feats_hidden
         
         if self.output_attentions:
-            return node_output, attentions
+            return node_feats_output, attentions
         else:
-            return node_output
+            return node_feats_output
     
 
-class _MetalSiteFoundationalModel(torch.nn.Module):
+class MetalSiteFoundationalBackbone(torch.nn.Module):
     """E3-equivariant transformer model for learning protein metal site representations.
 
     Processes protein structure graphs using SO(3)-equivariant attention mechanisms. Takes atomic coordinates and identities as input 
     and produces equivariant node-level features that can be used for downstream tasks.
 
     Args:
-        irreps_node_embedding: Irreps for initial node embeddings after projection. Default: 128 scalars, 64 vectors, 32 l=2
-        irreps_sh: Irreps for spherical harmonics edge features. Default: up to l=3
-        irreps_output: Irreps for final node features. Default: same as node embedding
-        tokenizer: Vocabulary for converting atomic info to indices
-        atom_embedding_dims: Dimension for atomic feature embedding. Default: 16
-        max_radius: Maximum radius in Angstroms for constructing edges. Default: 6.0
-        number_basis: Number of radial basis functions. Default: 32 
-        fc_neurons: Hidden layer sizes for radial networks. Default: [32, 32]
-        irreps_head: Feature irreps per attention head. Default: 32 scalars, 16 vectors, 8 l=2
+        irreps_node_feats: Irreps for initial node embeddings. Default: 128x0e+64x1o+32x2e
+        irreps_sh: Irreps for spherical harmonics. Default: up to l=3
+        irreps_node_output: Irreps for final features. Default: same as node_embed
+        atom_vocab_size: Number of atom types. Default: 14
+        atom_type_vocab_size: Number of record types. Default: 3
+        atom_embed_dim: Dimension for atomic feature embedding. Default: 16
+        max_radius: Maximum radius (Å) for edges. Default: 6.0
+        num_basis: Number of radial basis functions. Default: 32 
+        fc_neurons: Hidden layer sizes for radial networks
+        irreps_head: Feature irreps per attention head
         num_heads: Number of attention heads. Default: 4
         num_layers: Number of transformer blocks. Default: 2
-        alpha_drop: Dropout rate for attention weights. Default: 0.0
-        proj_drop: Dropout rate for projections. Default: 0.0
-        out_drop: Dropout rate for outputs. Default: 0.0
-        drop_path_rate: Dropout rate for skip connections. Default: 0.0
-        avg_aggregate_num: Number of neighbors for edge degree embedding. Default: 12
-
-    Returns:
-        node_hidden_state: Node features with irreps_output symmetry
-        node_attrs: Original one-hot node attributes
-
-    Raises:
-        ValueError: If tokenizer is not provided
+        alpha_drop: Attention dropout rate. Default: 0.0
+        proj_drop: Projection dropout rate. Default: 0.0
+        drop_path_rate: Skip connection dropout rate. Default: 0.0
+        avg_num_neighbors: Expected neighbors for degree embedding. Default: 12
+        output_attentions: Return attention weights
+        output_hidden_states: Return all hidden states
     """
     def __init__(
         self,
-        irreps_node_embedding: o3.Irreps=o3.Irreps('128x0e+64x1o+32x2e'),
-        irreps_sh: o3.Irreps=o3.Irreps.spherical_harmonics(3),
-        irreps_output: o3.Irreps=o3.Irreps('128x0e+64x1o+32x2e'),
-        tokenizer: AtomTokenizer=None,
-        atom_embedding_dims: int=16,
-        max_radius: float=6.0,
-        number_basis: int=32,
-        fc_neurons: List[int]=[32, 32],
-        irreps_head: o3.Irreps=o3.Irreps('32x0e+16x1o+8x2e'),
-        num_heads: int=4,
-        num_layers: int=2,
-        alpha_drop: float=0.0,
-        proj_drop: float=0.0,
-        out_drop: float=0.0,
-        drop_path_rate: float=0.0,
-        avg_aggregate_num: int=12,
-        output_attentions: bool=False,
-        output_hidden_states: bool=False,
+        irreps_node_feats: o3.Irreps = o3.Irreps('128x0e+64x1o+32x2e'),
+        irreps_sh: o3.Irreps = o3.Irreps.spherical_harmonics(3),
+        irreps_node_output: o3.Irreps = o3.Irreps('128x0e+64x1o+32x2e'),
+        atom_vocab_size: int = 14,
+        atom_type_vocab_size: int = 3,
+        atom_embed_dim: int = 16,
+        max_radius: float = 6.0,
+        num_basis: int = 32,
+        fc_neurons: List[int] = [32, 32],
+        irreps_head: o3.Irreps = o3.Irreps('32x0e+16x1o+8x2e'),
+        num_heads: int = 4,
+        num_layers: int = 2,
+        alpha_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        drop_path_rate: float = 0.0,
+        avg_num_neighbors: int = 12,
+        output_attentions: bool = False,
+        output_hidden_states: bool = False,
     ):
         super().__init__()
 
-        self.irreps_node_embedding = o3.Irreps(irreps_node_embedding)
+        self.irreps_node_feats = o3.Irreps(irreps_node_feats)
         self.irreps_sh = o3.Irreps(irreps_sh)
-        self.irreps_output = o3.Irreps(irreps_output)
-        self.tokenizer = tokenizer
-        self.atom_embedding_dims = atom_embedding_dims
+        self.irreps_node_output = o3.Irreps(irreps_node_output)
+        self.atom_vocab_size = atom_vocab_size
+        self.atom_type_vocab_size = atom_type_vocab_size
+        self.atom_embed_dim = atom_embed_dim
         self.max_radius = max_radius
-        self.number_basis = number_basis
+        self.num_basis = num_basis
         self.fc_neurons = fc_neurons
         self.irreps_head = o3.Irreps(irreps_head)
-        self.num_headss = num_heads
+        self.num_heads = num_heads
         self.num_layers = num_layers
-        self.alpha_drop = alpha_drop
-        self.proj_drop = proj_drop
-        self.out_drop = out_drop
-        self.drop_path_rate = drop_path_rate
-        self.avg_aggregate_num = avg_aggregate_num
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
 
-        self.irreps_node_attr = o3.Irreps(f"{self.tokenizer.oh_size}x0e")
-        self.irreps_edge_features = o3.Irreps(f"{number_basis}x0e")
+        oh_size = atom_vocab_size + atom_type_vocab_size
+
+        self.irreps_node_attr = o3.Irreps(f"{oh_size}x0e")
+        self.irreps_edge_features = o3.Irreps(f"{num_basis}x0e")
         self.irreps_edge_attr = self.irreps_sh
 
-        # embed the atoms
-        if self.tokenizer is None:
-            raise ValueError("Vocabulary must be provided for atom embedding")
-        self.atom_embedder = AtomEmbedding(
+        # Embed atoms
+        self.atom_embedder = AtomEmbeddingLayer(
             categorical_features=[
-                (self.tokenizer.atom_vocab.vocab_size, self.atom_embedding_dims),
-                (self.tokenizer.record_vocab.vocab_size, self.atom_embedding_dims)
+                (self.atom_vocab_size, self.atom_embed_dim),
+                (self.atom_type_vocab_size, self.atom_embed_dim)
             ],
             continuous_features=None,
-            irreps_out=self.irreps_node_embedding
+            irreps_out=self.irreps_node_feats
         )
 
-        # radial basis features
+        # Edge features
         self.radial_basis = GaussianRadialBasisLayer(
-            self.number_basis, self.max_radius
+            self.num_basis, self.max_radius
         )
 
-        # incorporate geometry into initial embedding
-        self.edge_deg_embedding = EdgeDegreeEmbeddingNetwork(
-            self.irreps_node_embedding,
+        # Initial geometric embedding
+        self.edge_degree_embedding = EdgeDegreeEmbeddingNetwork(
+            self.irreps_node_feats,
             self.irreps_sh,
-            fc_neurons=[self.number_basis] + self.fc_neurons,
-            avg_aggregate_num=self.avg_aggregate_num
+            fc_neurons=[self.num_basis] + self.fc_neurons,
+            avg_aggregate_num=avg_num_neighbors
         )
 
-        # transformer blocks
+        # Transformer blocks
         self.blocks = torch.nn.ModuleList()
-        for i in range(self.num_layers):
-            if i != self.num_layers - 1:
-                irreps_output = self.irreps_node_embedding
-            else:
-                irreps_output = self.irreps_output
-
-            block = TransformerBlock(
-                irreps_node_input=self.irreps_node_embedding,
+        for i in range(num_layers):
+            irreps_out = irreps_node_output if i == num_layers - 1 else irreps_node_feats
+            
+            block = TransformerBlockLayer(
+                irreps_node_feats=self.irreps_node_feats,
                 irreps_node_attr=self.irreps_node_attr,
                 irreps_edge_attr=self.irreps_edge_attr,
                 irreps_edge_features=self.irreps_edge_features,
-                irreps_node_output=irreps_output,
-                num_headss=self.num_headss,
-                drop_path_rate=self.drop_path_rate,
-                alpha_drop=self.alpha_drop,
-                proj_drop=self.proj_drop,
-                output_attentions=self.output_attentions
+                irreps_node_output=irreps_out,
+                num_heads=self.num_heads,
+                drop_path_rate=drop_path_rate,
+                alpha_drop=alpha_drop,
+                proj_drop=proj_drop,
+                output_attentions=output_attentions
             )
             self.blocks.append(block)
 
@@ -614,167 +602,169 @@ class _MetalSiteFoundationalModel(torch.nn.Module):
             torch.nn.init.constant_(m.weight, 1.0)
 
     def forward(
-            self, atom_identifiers, positions, batch_indices, **kwargs):
-
-        # get edges
+        self,
+        atom_tokens: torch.Tensor,  
+        pos: torch.Tensor,
+        batch_idx: torch.Tensor,
+        **kwargs
+    ) -> Dict[str, torch.Tensor]:
+        """Forward pass through backbone.
+        
+        Args:
+            atom_tokens: [num_nodes, 2] Node categorical features (atoms and types)
+            pos: [num_nodes, 3] Node coordinates
+            batch_idx: [num_nodes] Batch assignments
+            
+        Returns:
+            Dict containing:
+                node_feats: [num_nodes, irreps_node_output.dim] Output features
+                node_attr: [num_nodes, irreps_node_attr.dim] Node attributes
+                edge_attr: Optional[num_edges, irreps_edge_attr.dim] Edge attributes
+                hidden_states: Optional List of intermediate features
+                attentions: Optional List of attention weights
+        """
+        # Get edges
         edge_src, edge_dst = radius_graph(
-            positions, r=self.max_radius, batch=batch_indices, loop=False
+            pos, r=self.max_radius, batch=batch_idx, loop=False
         )
-        edge_vec = positions.index_select(0, edge_src) - positions.index_select(0, edge_dst)
-        edge_attributes = o3.spherical_harmonics(l=self.irreps_edge_attr, x=edge_vec, normalize=True, normalization='component')
-        edge_distances = edge_vec.norm(dim=-1)
-        edge_features = self.radial_basis(edge_distances)
-
-        # and nodes
-        node_features, node_attrs = self.atom_embedder(atom_identifiers)
-
-        # incorporate geometry into nodes
-        edge_degree_embedding = self.edge_deg_embedding(
-            node_features, edge_attributes, edge_features, edge_src, edge_dst, batch_indices
+        edge_vec = pos.index_select(0, edge_src) - pos.index_select(0, edge_dst)
+        
+        # Edge features
+        edge_attr = o3.spherical_harmonics(
+            l=self.irreps_edge_attr,
+            x=edge_vec,
+            normalize=True,
+            normalization='component'
         )
-        node_hidden_state = node_features + edge_degree_embedding
+        edge_lengths = edge_vec.norm(dim=-1)
+        edge_embedding = self.radial_basis(edge_lengths)
 
-        # run through transformer blocks
+        # Node features
+        node_feats, node_attr = self.atom_embedder(atom_tokens)
+
+        # Incorporate geometry
+        edge_degree_embedding = self.edge_degree_embedding(
+            node_feats,
+            edge_attr,
+            edge_embedding,
+            edge_src,
+            edge_dst,
+            batch_idx
+        )
+        node_feats = node_feats + edge_degree_embedding
+
+        # Store intermediate states
         hidden_states = []
+        attentions = []
+
+        # Forward through blocks
         for block in self.blocks:
-            node_hidden_state = block(
-                node_hidden_state, node_attrs, edge_src, edge_dst, edge_attributes, edge_features, batch_indices
-            )
             if self.output_attentions:
-                node_hidden_state, attentions = node_hidden_state
-                hidden_states.append(attentions)
+                node_feats, block_attentions = block(
+                    node_feats, node_attr,
+                    edge_src, edge_dst,
+                    edge_attr, edge_embedding,
+                    batch_idx
+                )
+                attentions.append(block_attentions)
+            else:
+                node_feats = block(
+                    node_feats, node_attr,
+                    edge_src, edge_dst,
+                    edge_attr, edge_embedding,
+                    batch_idx
+                )
+            
+            if self.output_hidden_states:
+                hidden_states.append(node_feats)
 
-        outs = {}
-        outs['node_hidden_state'] = node_hidden_state
-        outs['node_attrs'] = node_attrs
+        outputs = {
+            'node_feats': node_feats,
+            'node_attr': node_attr,
+            'edge_attr': edge_attr,
+            'edge_embedding': edge_embedding
+        }
+
         if self.output_hidden_states:
-            outs['hidden_states'] = hidden_states
-
+            outputs['hidden_states'] = hidden_states
+            
         if self.output_attentions:
-            outs['attentions'] = hidden_states
+            outputs['attentions'] = attentions
 
-        return outs
+        return outputs
     
 
-class _MetalSiteNodeHead(torch.nn.Module):
+class MetalSiteNodeHeadLayer(torch.nn.Module):
     """Output logits over vocab and a vector.
     
     Note that there is no scaling factor applied here, thus this module should be trained
-    on normed/scalled quantities.
+    on normed/scaled quantities.
 
-    Args
-        irreps_node_input: Input node feature irreps
-        irreps_node_attrs: Node attribute irreps
+    Args:
+        irreps_node_feats: Input node feature irreps
+        irreps_node_attr: Node attribute irreps
         proj_drop: Dropout rate for output projection
-        tokenizer: AtomTokenizer
+        atom_vocab_size: Number of atom types
+        atom_type_vocab_size: Number of record types
+        
+    Returns:
+        atom_logits: [num_nodes, atom_vocab_size] Atom type predictions
+        type_logits: [num_nodes, record_vocab_size] Record type predictions  
+        coordinates: [num_nodes, 3] Coordinate adjustments
     """
     def __init__(
         self,
-        irreps_node_input: o3.Irreps=o3.Irreps('128x0e+64x1o+32x2e'),
-        irreps_node_attrs: o3.Irreps=o3.Irreps('1x0e'),
-        proj_drop: float=0.0,
-        tokenizer: AtomTokenizer=None
+        irreps_node_feats: o3.Irreps,
+        irreps_node_attr: o3.Irreps,
+        proj_drop: float = 0.0,
+        atom_vocab_size: int = 14,
+        atom_type_vocab_size: int = 3,
     ):
         super().__init__()
-        self.irreps_node_input = o3.Irreps(irreps_node_input)
-        self.irreps_node_attrs = o3.Irreps(irreps_node_attrs)
+        
+            
+        self.irreps_node_feats = o3.Irreps(irreps_node_feats)
+        self.irreps_node_attr = o3.Irreps(irreps_node_attr)
         self.proj_drop = proj_drop
-        if tokenizer is None:
-            raise ValueError("Vocabulary must be provided for atom embedding")
-        self.tokenizer = tokenizer
+        self.atom_vocab_size = atom_vocab_size
+        self.atom_type_vocab_size = atom_type_vocab_size
 
-        self.n_tokens = self.tokenizer.oh_size
+        self.n_tokens = self.atom_vocab_size + self.atom_type_vocab_size
         self.irreps_output = o3.Irreps(f"{self.n_tokens}x0e+1x1o")
 
-        # get layer norm
-        self.norm_layer = get_norm_layer('layer')(self.irreps_node_input)
-
-        # ffn
+        # Layer norm & FFN 
+        self.norm = get_norm_layer('layer')(self.irreps_node_feats)
         self.head = FeedForwardNetwork(
-            irreps_node_input=self.irreps_node_input,
-            irreps_node_attr=self.irreps_node_attrs,
+            irreps_node_input=self.irreps_node_feats,
+            irreps_node_attr=self.irreps_node_attr,
             irreps_node_output=self.irreps_output,
             proj_drop=self.proj_drop
         )
 
     def forward(
         self,
-        node_input: torch.Tensor,
-        node_attrs: torch.Tensor,
+        node_feats: torch.Tensor,
+        node_attr: torch.Tensor,
         **kwargs
-    ) -> torch.Tensor:
-        node_input = self.norm_layer(node_input)
-        node_output = self.head(node_input, node_attrs)
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Forward pass through prediction head.
         
-        # extract scalaras and vectors
-        atom_scalars = node_output[:, :self.tokenizer.atom_vocab.vocab_size]
-        atom_type_scalars = node_output[:, self.tokenizer.atom_vocab.vocab_size:self.n_tokens]
-        vectors = node_output[:, self.n_tokens:]
-        return atom_scalars, atom_type_scalars, vectors
-
-
-# class MetalSiteNodeModel(torch.nn.Module):
-#     """Combines foundational model and head for a full model that can be trained simultaneously for atom demasking and
-#     position denoising."""
-    
-#     def __init__(
-#         self,
-#         node_model: MetalSiteFoundationalModel,
-#         node_head: MetalSiteNodeHead
-#     ):
-#         super().__init__()
-#         self.node_model = node_model
-#         self.node_head = node_head
-
-#     def forward(
-#         self,
-#         atom_identifiers, positions, batch_indices, **kwargs
-#     ):
-#         node_hidden_state, node_attrs = self.node_model(
-#             atom_identifiers, positions, batch_indices
-#         )
-#         atom_scalars, atom_type_scalars, vectors = self.node_head(node_hidden_state, node_attrs)
-#         return atom_scalars, atom_type_scalars, vectors
-    
-
-def get_irreps(l: int, scale: int, decay: float, num_headss: int = None) -> tuple[o3.Irreps, o3.Irreps]:
-    """Generate scalable irreps for network features and attention heads.
-    
-    Args:
-        l: Maximum order of irreps
-        scale: Base multiplicity for l=0 irreps
-        decay: Factor to reduce multiplicity for each l (decay^l)
-        num_headss: If provided, returns attention head irreps with multiplicities divided by num_headss
-    
-    Returns:
-        hidden_irreps: Full irreps for hidden features
-        head_irreps: Irreps for attention heads if num_headss provided, else None
-    """
-    irreps = []
-    head_irreps = []
-    
-    for i in range(l + 1):
-        # Calculate multiplicity with decay
-        mult = int(scale * (decay ** i))
-        if mult == 0:
-            continue
+        Args:
+            node_feats: [num_nodes, irreps_node_feats.dim] Node features
+            node_attr: [num_nodes, irreps_node_attr.dim] Node attributes
             
-        # Add even and odd irreps of order i
-        irreps.extend([
-            (mult, (i, 1)),  # even
-            (mult, (i, -1))  # odd
-        ])
+        Returns:
+            atom_logits: [num_nodes, atom_vocab_size] Atom type predictions
+            type_logits: [num_nodes, record_vocab_size] Record type predictions
+            coordinates: [num_nodes, 3] Coordinate adjustments
+        """
+        node_feats = self.norm(node_feats)
+        outputs = self.head(node_feats, node_attr)
         
-        # Calculate head multiplicities if requested
-        if num_headss is not None:
-            head_mult = math.ceil(mult / num_headss)
-            if head_mult > 0:
-                head_irreps.extend([
-                    (head_mult, (i, 1)),
-                    (head_mult, (i, -1))
-                ])
-    
-    hidden_irreps = o3.Irreps(irreps)
-    head_irreps = o3.Irreps(head_irreps) if num_headss is not None else None
-    
-    return hidden_irreps, head_irreps
+        # Split outputs into logits and coordinates
+        atom_logits = outputs[:, :self.atom_vocab_size]
+        type_logits = outputs[:, self.atom_vocab_size:self.n_tokens]
+        assert type_logits.shape[1] == self.atom_type_vocab_size
+        coordinates = outputs[:, self.n_tokens:]
+        
+        return atom_logits, type_logits, coordinates

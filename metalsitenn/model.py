@@ -12,13 +12,13 @@ from torch import nn
 import torch
 from e3nn import o3
 import math
+from dataclasses import dataclass
 
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
 from transformers.configuration_utils import PretrainedConfig
 
-from metalsitenn.nn import _MetalSiteFoundationalModel, _MetalSiteNodeHead
-from metalsitenn.atom_vocabulary import AtomTokenizer
+from metalsitenn.nn import MetalSiteFoundationalBackbone, MetalSiteNodeHeadLayer
 
 from typing import List, Optional
 
@@ -68,149 +68,207 @@ def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple
 
 # EXPECTED CONFIGURATION
 class MetalSiteNNConfig(PretrainedConfig):
-    """Configuration for Metal site model.
-
+    """Configuration for E3-equivariant metal site model.
+    
     Args:
-        irreps_node_embedding (str, o3.Irreps) : Irreps for node embeddings inside model layers
-        irreps_sh (str, o3.Irreps) : Irreps for spherical harmonics
-        irreps_foundation_output (str, o3.Irreps) : Irreps for the output of the foundation network
-        irreps_pred_head_output (str, o3.Irreps) : Irreps for the output of the prediction head
-        tokenizer (AtomTokenizer) : Tokenizer for atomic data, needed to get embeddings sizes
-        atom_embedding_dims (int) : Dimensionality for initial atom embeddings
-        max_radius (float) : Maximum radius for edges in the graph
-        number_basis (int) : Number of basis functions for learned radial gaussian basis
-        fc_neurons (List[int]) : Number of neurons in each fully connected layer for internal nonlinest FFNNs
-        irreps_head (str, o3.Irreps) : Irreps for the output of each attention head
-        num_heads (int) : Number of attention heads
-        num_layers (int) : Number of transformer layers
-        alpha_drop (float) : Dropout rate for attention dropout
-        proj_drop (float) : Dropout rate for projection dropout
-        out_drop (float) : Dropout rate for output dropout
-        drop_path_rate (float) : Drop path rate edge dropping
-        avg_node_degree (int) : Average number of edges per node
-
-        output_attentions (bool, optional) : Whether to output attentions
-        output_hidden_states (bool, optional) : Whether to output hidden states
-        
+        irreps_node_feats: o3.Irreps = '128x0e+64x1o+32x2e' 
+            Initial node feature irreps
+        irreps_sh: o3.Irreps = o3.Irreps.spherical_harmonics(3)
+            Spherical harmonic irreps for edges
+        irreps_node_output: o3.Irreps = '128x0e+64x1o+32x2e'
+            Final node feature irreps
+        atom_vocab_size: int=14
+            Number of atom types, including mask etc.
+        atom_type_vocab_size: int=3
+            Number of atom types, including mask, etc.
+        atom_embed_dim: int = 16
+            Dimension of atomic embeddings
+        max_radius: float = 5.0 
+            Maximum radius (Å) for edges
+        num_basis: int = 32
+            Number of radial basis functions
+        fc_neurons: List[int] = [32, 32]
+            Hidden layer sizes for attention networks
+        irreps_head: o3.Irreps = '32x0e+16x1o+8x2e'
+            Feature irreps per attention head
+        num_heads: int = 4
+            Number of attention heads
+        num_layers: int = 2 
+            Number of transformer blocks
+        alpha_drop: float = 0.0
+            Attention dropout rate
+        proj_drop: float = 0.0
+            Projection dropout rate
+        drop_path_rate: float = 0.0
+            Skip connection dropout rate
+        avg_num_neighbors: int = 12
+            Expected neighbors for degree embedding
+        output_attentions: bool = False
+            Return attention weights
+        output_hidden_states: bool = False
+            Return all hidden states
     """
-
     def __init__(
         self,
-        irreps_node_embedding: o3.Irreps=o3.Irreps('128x0e+64x1o+32x2e'),
-        irreps_sh: o3.Irreps=o3.Irreps.spherical_harmonics(3),
-        irreps_foundation_output: o3.Irreps=o3.Irreps('128x0e+64x1o+32x2e'),
-        tokenizer: AtomTokenizer=None,
-        atom_embedding_dims: int=16,
-        max_radius: float=5.0,
-        number_basis: int=32,
-        fc_neurons: List[int]=[32,32],
-        irreps_head: o3.Irreps=o3.Irreps('32x0e+16x1o+8x2e'),
-        num_heads: int=4,
-        num_layers: int=2,
-        alpha_drop: float=0.0,
-        proj_drop: float=0.0,
-        out_drop: float=0.0,
-        drop_path_rate: float=0.0,
-        avg_node_degree: int=12,
+        irreps_node_feats: o3.Irreps = o3.Irreps('128x0e+64x1o+32x2e'),
+        irreps_sh: o3.Irreps = o3.Irreps.spherical_harmonics(3),
+        irreps_node_output: o3.Irreps = o3.Irreps('128x0e+64x1o+32x2e'),
+        atom_vocab_size: int = 14,
+        atom_type_vocab_size: int = 3,
+        atom_embed_dim: int = 16,
+        max_radius: float = 5.0,
+        num_basis: int = 32,
+        fc_neurons: List[int] = [32,32],
+        irreps_head: o3.Irreps = o3.Irreps('32x0e+16x1o+8x2e'),
+        num_heads: int = 4,
+        num_layers: int = 2,
+        alpha_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        drop_path_rate: float = 0.0,
+        avg_num_neighbors: int = 12,
         output_attentions: bool = False,
         output_hidden_states: bool = False,
-        output_starting_embeddings: bool = False,
+        output_initial_embeddings: bool = False,
+        label_smoothing_factor: float = 0.0,
         **kwargs
     ):
         super().__init__(**kwargs)
-        if tokenizer is None:
-            raise ValueError("Tokenizer must be provided")
-        self.irreps_node_embedding = o3.Irreps(irreps_node_embedding)
-        self.irreps_sh = o3.Irreps(irreps_sh)
-        self.irreps_foundation_output = o3.Irreps(irreps_foundation_output)
-        self.tokenizer = tokenizer
-        self.atom_embedding_dims = atom_embedding_dims
+            
+        self.irreps_node_feats = o3.Irreps(irreps_node_feats)
+        self.irreps_sh = o3.Irreps(irreps_sh)  
+        self.irreps_node_output = o3.Irreps(irreps_node_output)
+        self.atom_vocab_size = atom_vocab_size
+        self.atom_type_vocab_size = atom_type_vocab_size
+        self.atom_embed_dim = atom_embed_dim
         self.max_radius = max_radius
-        self.number_basis = number_basis
+        self.num_basis = num_basis
         self.fc_neurons = fc_neurons
         self.irreps_head = o3.Irreps(irreps_head)
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.alpha_drop = alpha_drop
         self.proj_drop = proj_drop
-        self.out_drop = out_drop
         self.drop_path_rate = drop_path_rate
-        self.avg_node_degree = avg_node_degree
+        self.avg_num_neighbors = avg_num_neighbors
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
-        self.output_starting_embeddings = output_starting_embeddings
+        self.output_initial_embeddings = output_initial_embeddings
+
+    def to_dict(self):
+        """Convert config to dict, handling non-serializable objects"""
+        config_dict = super().to_dict()
+        
+        # Convert irreps to strings
+        config_dict["irreps_node_feats"] = str(self.irreps_node_feats)
+        config_dict["irreps_sh"] = str(self.irreps_sh)
+        config_dict["irreps_node_output"] = str(self.irreps_node_output)
+        config_dict["irreps_head"] = str(self.irreps_head)
+        
+        # Remove tokenizer from serialization
+        config_dict.pop("tokenizer", None)
+        
+        return config_dict
+        
+    @classmethod
+    def from_dict(cls, config_dict):
+        """Create config from dict, handling irreps strings"""
+        # Convert irreps strings back to Irreps objects
+        for key in ["irreps_node_feats", "irreps_sh", "irreps_node_output", "irreps_head"]:
+            if key in config_dict:
+                config_dict[key] = o3.Irreps(config_dict[key])
+                
+        return super().from_dict(config_dict)
 
 # expected outputs
+@dataclass
 class MetalSiteFoundationalOutput(ModelOutput):
-    """
-    Output of the foundational network that outputs vectors.
-
+    """Output of the foundational backbone network.
+    
     Args:
-        hidden_state (torch.FloatTensor) : Hidden state of the network
-        node_attr (torch.FloatTensor) : Node attributes
-        edge_attr (torch.FloatTensor) : Edge attributes
-        edge_features (torch.FloatTensor) : Edge features
-        attentions (torch.FloatTensor, optional) : Attention weights, only if output_attentions=True
-        hidden_states (torch.FloatTensor, optional) : All hidden states of the network, only if output_hidden_states=True
+        node_feats: [num_nodes, irreps_node_output.dim] Node features
+        node_attr: [num_nodes, irreps_node_attr.dim] Node attributes  
+        edge_attr: [num_edges, irreps_edge_attr.dim] Edge spherical harmonics
+        edge_embedding: [num_edges, num_basis] Edge radial features
+        attentions: Optional List[[num_nodes, num_heads, num_nodes]] 
+            Attention weights per layer
+        hidden_states: Optional List[[num_nodes, irreps_node_feats.dim]]
+            Node features from each layer
     """
+    node_feats: torch.FloatTensor
+    node_attr: torch.FloatTensor
+    edge_attr: torch.FloatTensor
+    edge_embedding: torch.FloatTensor
+    attentions: Optional[List[torch.FloatTensor]] = None
+    hidden_states: Optional[List[torch.FloatTensor]] = None
 
     def __init__(
         self,
-        hidden_state: torch.FloatTensor,
+        node_feats: torch.FloatTensor,
         node_attr: torch.FloatTensor,
         edge_attr: torch.FloatTensor,
-        edge_features: torch.FloatTensor,
-        attentions: Optional[torch.FloatTensor] = None,
-        hidden_states: Optional[torch.FloatTensor] = None,
+        edge_embedding: torch.FloatTensor,
+        attentions: Optional[List[torch.FloatTensor]] = None,
+        hidden_states: Optional[List[torch.FloatTensor]] = None,
     ):
-        self.hidden_state = hidden_state
+        super().__init__()
+        self.node_feats = node_feats
         self.node_attr = node_attr
-        self.edge_attr = edge_attr
-        self.edge_features = edge_features
+        self.edge_attr = edge_attr 
+        self.edge_embedding = edge_embedding
         self.attentions = attentions
         self.hidden_states = hidden_states
     
-
+@dataclass
 class MetalSitePretrainingOutput(ModelOutput):
-    """
-    Output of the pretraining network that outputs vectors and logits.
-
+    """Output of the pretraining model.
+    
     Args:
-        atom_logits (torch.FloatTensor) : Logits for the classification task
-        atom_type_logits (torch.FloatTensor) : Logits for the atom type classification task
-        vectors (torch.FloatTensor) : Vectors for the regression task
-        edge_attr (torch.FloatTensor, optional) : Edge attributes, only if output_starting_embeddings=True
-        edge_features (torch.FloatTensor, optional) : Edge features, only if output_starting_embeddings=True
-        node_attr (torch.FloatTensor, optional) : Node attributes, only if output_starting_embeddings=True
-        attentions (torch.FloatTensor, optional) : Attention weights, only if output_attentions=True
-        hidden_states (torch.FloatTensor, optional) : All hidden states of the network, only if output_hidden_states=True
-        mask_ce_loss (torch.FloatTensor, optional) : Cross entropy loss for masked language model
-        noise_mse_loss (torch.FloatTensor, optional) : Mean squared error loss for noise prediction
+        atom_logits: [num_nodes, atom_vocab_size] Atom type predictions
+        type_logits: [num_nodes, record_vocab_size] Record type predictions
+        output_vectors: [num_nodes, 3] Predicted coordinate vectors
+        edge_attr: Optional [num_edges, irreps_edge_attr.dim] Edge spherical harmonics
+        edge_embedding: Optional [num_edges, num_basis] Edge radial features 
+        node_attr: Optional [num_nodes, irreps_node_attr.dim] Node attributes
+        attentions: Optional List[[num_nodes, num_heads, num_nodes]] Attention weights
+        hidden_states: Optional List[[num_nodes, irreps_node_feats.dim]] Node features
+        mask_loss: Optional [] Masked atom prediction loss (sum)
+        coord_loss: Optional [] Coordinate prediction loss (sum)
     """
+    atom_logits: torch.FloatTensor
+    type_logits: torch.FloatTensor  
+    output_vectors: torch.FloatTensor
+    edge_attr: Optional[torch.FloatTensor] = None
+    edge_embedding: Optional[torch.FloatTensor] = None
+    node_attr: Optional[torch.FloatTensor] = None
+    attentions: Optional[List[torch.FloatTensor]] = None
+    hidden_states: Optional[List[torch.FloatTensor]] = None
+    mask_loss: Optional[torch.FloatTensor] = None
+    coord_loss: Optional[torch.FloatTensor] = None
 
     def __init__(
         self,
         atom_logits: torch.FloatTensor,
-        atom_type_logits: torch.FloatTensor,
+        type_logits: torch.FloatTensor,
         output_vectors: torch.FloatTensor,
-        edge_attr: torch.FloatTensor=None,
-        edge_features: torch.FloatTensor=None,
-        node_attr: torch.FloatTensor=None,
-        attentions: Optional[torch.FloatTensor] = None,
-        hidden_states: Optional[torch.FloatTensor] = None,
-        mask_ce_loss: Optional[torch.FloatTensor] = None,
-        noise_mse_loss: Optional[torch.FloatTensor] = None,
+        edge_attr: Optional[torch.FloatTensor] = None,
+        edge_embedding: Optional[torch.FloatTensor] = None,
+        node_attr: Optional[torch.FloatTensor] = None,
+        attentions: Optional[List[torch.FloatTensor]] = None,
+        hidden_states: Optional[List[torch.FloatTensor]] = None,
+        mask_loss: Optional[torch.FloatTensor] = None,
+        coord_loss: Optional[torch.FloatTensor] = None,
     ):
+        super().__init__()
         self.atom_logits = atom_logits
-        self.atom_type_logits = atom_type_logits
+        self.type_logits = type_logits
         self.output_vectors = output_vectors
         self.edge_attr = edge_attr
-        self.edge_features = edge_features
+        self.edge_embedding = edge_embedding
         self.node_attr = node_attr
         self.attentions = attentions
         self.hidden_states = hidden_states
-        self.mask_ce_loss = mask_ce_loss
-        self.noise_mse_loss = noise_mse_loss
+        self.mask_loss = mask_loss
+        self.coord_loss = coord_loss
         
 
 class MetalSitePretrainedModel(PreTrainedModel):
@@ -223,162 +281,200 @@ class MetalSitePretrainedModel(PreTrainedModel):
         
         
 class MetalSiteFoundationalModel(MetalSitePretrainedModel):
-
+    """Wrapper for E3-equivariant transformer backbone."""
+    
     def __init__(self, config: MetalSiteNNConfig):
         super().__init__(config)
         self.config = config
-        self._model = _MetalSiteFoundationalModel(
-            irreps_node_embedding=config.irreps_node_embedding,
+        self.backbone = MetalSiteFoundationalBackbone(
+            irreps_node_feats=config.irreps_node_feats,
             irreps_sh=config.irreps_sh,
-            irreps_output=config.irreps_node_embedding,
-            tokenizer=config.tokenizer,
-            atom_embedding_dims=config.atom_embedding_dims,
+            irreps_node_output=config.irreps_node_output,
+            atom_vocab_size=config.atom_vocab_size,
+            atom_type_vocab_size=config.atom_type_vocab_size,
+            atom_embed_dim=config.atom_embed_dim,
             max_radius=config.max_radius,
-            number_basis=config.number_basis,
+            num_basis=config.num_basis,
             fc_neurons=config.fc_neurons,
             irreps_head=config.irreps_head,
-            num_heads=config.num_heads,
+            num_heads=config.num_heads, 
             num_layers=config.num_layers,
             alpha_drop=config.alpha_drop,
             proj_drop=config.proj_drop,
-            out_drop=config.out_drop,
             drop_path_rate=config.drop_path_rate,
-            avg_aggregate_num=config.avg_node_degree,
+            avg_num_neighbors=config.avg_num_neighbors,
             output_attentions=config.output_attentions,
             output_hidden_states=config.output_hidden_states,
         )
 
-    def forward(self,
-                atoms: torch.Tensor,
-                atom_types: torch.Tensor,
-                positions: torch.Tensor,
-                batch_indices: torch.Tensor,
-                **kwargs
-                ) -> MetalSiteFoundationalOutput:
-        # atom embedder tensor
-        # in our case tokens for element and tokens for atom type
-        atom_identifiers = torch.stack([atoms, atom_types], dim=-1)
-        inner_output = self._model(
-            atom_identifiers=atom_identifiers,
-            positions=positions,
-            batch_indices=batch_indices, **kwargs)
+    def forward(
+        self,
+        atoms: torch.Tensor,
+        atom_types: torch.Tensor, 
+        pos: torch.Tensor,
+        batch_idx: torch.Tensor,
+        **kwargs
+    ) -> MetalSiteFoundationalOutput:
+        """Forward pass through foundational model.
         
-        # construct output object
-        output = MetalSiteFoundationalOutput(
-            hidden_state=inner_output['node_hidden_state'],
-            node_attr=inner_output['node_attrs'],
-            edge_attr=inner_output['edge_attrs'] if 'edge_attrs' in inner_output else None,
-            edge_features=inner_output['edge_features'] if 'edge_features' in inner_output else None,
-            attentions=inner_output['attentions'] if 'attentions' in inner_output else None,
-            hidden_states=inner_output['hidden_states'] if 'hidden_states' in inner_output else None
+        Args:
+            atoms: [num_nodes] Atom type tokens
+            atom_types: [num_nodes] Record type tokens
+            pos: [num_nodes, 3] Node coordinates
+            batch_idx: [num_nodes] Batch assignments
+            
+        Returns:
+            MetalSiteFoundationalOutput containing node features and attributes
+        """
+        # Stack tokens for embedding
+        atom_tokens = torch.stack([atoms, atom_types], dim=-1)
+
+        # Forward through backbone 
+        outputs = self.backbone(
+            atom_tokens=atom_tokens,
+            pos=pos, 
+            batch_idx=batch_idx,
+            **kwargs
         )
-        return output
+        
+        return MetalSiteFoundationalOutput(**outputs)
 
 
 class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
+    """E3-equivariant transformer model for metal site pretraining."""
 
     def __init__(self, config: MetalSiteNNConfig):
         super().__init__(config)
         self.config = config
-        self.foundational_model = MetalSiteFoundationalModel(config)
-        self.pred_head = _MetalSiteNodeHead(
-            irreps_node_input=config.irreps_node_embedding,
-            irreps_node_attrs=self.foundational_model._model.irreps_node_attr,
+        self.backbone = MetalSiteFoundationalModel(config)
+        self.head = MetalSiteNodeHeadLayer(
+            irreps_node_feats=config.irreps_node_feats,
+            irreps_node_attr=self.backbone.backbone.irreps_node_attr,
             proj_drop=config.proj_drop,
-            tokenizer=config.tokenizer)
-        
+            atom_vocab_size=config.atom_vocab_size,
+            atom_type_vocab_size=config.atom_type_vocab_size,
+        )
+        self.cel = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor)
 
-    def compute_atom_masking_loss(
+    def compute_mask_loss(
             self,
             atom_logits: torch.Tensor,
             atom_labels: torch.Tensor,
-            mask_mask: torch.Tensor) -> torch.Tensor:
-        """Compute cross entropy loss for masked language model."""
-        # get the mask
-        mask = mask_mask.bool()
-        # get the logits for the masked atoms
-        logits = atom_logits[mask]
-        # get the labels for the masked atoms
-        labels = atom_labels[mask]
-        # compute the loss
-        return nn.functional.cross_entropy(logits, labels)
+            mask_indices: torch.Tensor=None
+        ) -> torch.Tensor:
+        """Compute cross entropy loss for masked atom prediction.
+        
+        Args:
+            atom_logits: [num_nodes, vocab_size] Atom type predictions
+            atom_labels: [num_nodes] True atom tokens
+            mask_indices: [num_nodes] Boolean mask of masked positions, if passed only masked atoms are considered
+        """
+        if mask_indices is not None:
+            mask = mask_indices.bool()
+            return self.cel(
+                atom_logits[mask],
+                atom_labels[mask]
+            )
+        else:
+            return self.cel(
+                atom_logits,
+                atom_labels
+            )
     
-    def compute_position_noising_loss(
+    def compute_coord_loss(
             self,
             output_vectors: torch.Tensor,
-            denoise_vectors: torch.Tensor,
-            noise_loss_mask: torch.Tensor) -> torch.Tensor:
-        """Compute mean squared error in euclidean distance for noising loss."""
+            target_vectors: torch.Tensor,
+            loss_indices: torch.Tensor=None
+        ) -> torch.Tensor:
+        """Compute MSE loss for coordinate prediction.
+        
+        Args:
+            output_vectors: [num_nodes, 3] Predicted coordinate vectors
+            target_vectors: [num_nodes, 3] Target coordinate vectors
+            loss_indices: [num_nodes] Boolean mask for loss computation, if passed only selected atoms are considered
+        """
+        def get_loss(output_vectors, target_vectors):
+            # square and mean over the last dimension
+            losses = torch.sqrt(((output_vectors - target_vectors) ** 2).sum(dim=-1))
+            # mean over atoms
+            return losses.mean()
 
-        # get the mask
-        mask = noise_loss_mask.bool()
-        # get the vectors for the noised atoms
-        vectors = output_vectors[mask]
-        # get the denoised vectors
-        denoise = denoise_vectors[mask]
-        # compute the loss
-        return nn.functional.mse_loss(vectors, denoise)
+        if loss_indices is not None:
+            mask = loss_indices.bool()
+            return get_loss(output_vectors[mask], target_vectors[mask])
+        
+        return get_loss(output_vectors, target_vectors)
 
     def forward(
             self,
             atoms: torch.Tensor,
             atom_types: torch.Tensor,
-            positions: torch.Tensor,
-            batch_indices: torch.Tensor,
-            mask_mask: torch.Tensor=None,
-            atom_labels: torch.Tensor=None,
-            atom_type_labels: torch.Tensor=None,
-            noise_mask: torch.Tensor=None,
-            denoise_vectors: torch.Tensor=None,
-            noise_loss_mask: torch.Tensor=None,
-            **kwargs) -> MetalSitePretrainingOutput:
+            pos: torch.Tensor,
+            batch_idx: torch.Tensor,
+            mask: Optional[torch.Tensor] = None,
+            atom_labels: Optional[torch.Tensor] = None,
+            atom_type_labels: Optional[torch.Tensor] = None,
+            noise_mask: Optional[torch.Tensor] = None,
+            denoise_vectors: Optional[torch.Tensor] = None,
+            **kwargs
+        ) -> MetalSitePretrainingOutput:
+        """Forward pass through pretraining model.
         
-        foundational_output = self.foundational_model(
+        Args:
+            atoms: [num_nodes] Atom type tokens
+            atom_types: [num_nodes] Record type tokens 
+            pos: [num_nodes, 3] Node coordinates
+            batch_idx: [num_nodes] Batch assignments
+            mask: Optional [num_nodes] Boolean mask of masked atoms
+            atom_labels: Optional [num_nodes] True atom tokens at masked positions
+            atom_type_labels: Optional [num_nodes] True type tokens at masked positions
+            noise_mask: Optional [num_nodes] Boolean mask of noised coordinates
+            denoise_vectors: Optional [num_nodes, 3] Target coordinate vectors
+        """
+        backbone_out = self.backbone(
             atoms=atoms,
             atom_types=atom_types,
-            positions=positions,
-            batch_indices=batch_indices,
+            pos=pos,
+            batch_idx=batch_idx,
             **kwargs
         )
 
-        # apply prediction head
-        atom_scalars_logits, atom_type_scalars_logits, output_vectors = self.pred_head(
-            node_input=foundational_output.hidden_state,
-            node_attrs=foundational_output.node_attr,
+        atom_logits, type_logits, output_vectors = self.head(
+            node_feats=backbone_out.node_feats,
+            node_attr=backbone_out.node_attr,
         )
-        # compute losses
-        if mask_mask is not None:
-            mask_ce_loss = self.compute_atom_masking_loss(
-                atom_logits=atom_scalars_logits,
+
+        # Compute losses if labels provided
+        mask_loss = None
+        if mask is not None and atom_labels is not None:
+            mask_loss = self.compute_mask_loss(
+                atom_logits=atom_logits,
                 atom_labels=atom_labels,
-                mask_mask=mask_mask
             )
-        else:
-            mask_ce_loss = None
+            mask_loss += self.compute_mask_loss(
+                atom_logits=type_logits,
+                atom_labels=atom_type_labels,
+            )
 
-        if noise_mask is not None:
-            noise_mse_loss = self.compute_position_noising_loss(
+        coord_loss = None
+        if noise_mask is not None and denoise_vectors is not None:
+            coord_loss = self.compute_coord_loss(
                 output_vectors=output_vectors,
-                denoise_vectors=denoise_vectors,
-                noise_loss_mask=noise_loss_mask
+                target_vectors=denoise_vectors,
             )
-        else:
-            noise_mse_loss = None
 
-        # construct output object
-        output = MetalSitePretrainingOutput(
-            atom_logits=atom_scalars_logits,
-            atom_type_logits=atom_type_scalars_logits,
+        return MetalSitePretrainingOutput(
+            atom_logits=atom_logits,
+            type_logits=type_logits,
             output_vectors=output_vectors,
-            edge_attr=foundational_output.edge_attr,
-            edge_features=foundational_output.edge_features,
-            node_attr=foundational_output.node_attr,
-            attentions=foundational_output.attentions,
-            hidden_states=foundational_output.hidden_states,
-            mask_ce_loss=mask_ce_loss,
-            noise_mse_loss=noise_mse_loss
+            edge_attr=backbone_out.edge_attr,
+            edge_embedding=backbone_out.edge_embedding,
+            node_attr=backbone_out.node_attr,
+            attentions=backbone_out.attentions,
+            hidden_states=backbone_out.hidden_states,
+            mask_loss=mask_loss,
+            coord_loss=coord_loss
         )
-
-        return output
 
                 

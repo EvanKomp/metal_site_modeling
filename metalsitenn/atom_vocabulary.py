@@ -7,11 +7,13 @@
 '''
 """metalsitenn/vocab.py"""
 
-from typing import List, Union, Dict, Set
+from typing import List, Union, Dict, Set, Optional
 import torch
 import numpy as np
 from .constants import (METAL_IONS, RECORD_TYPES, COMMON_PROTEIN_ATOMS, UNCOMMON_PROTEIN_ATOMS)
 import copy
+from pathlib import Path
+import json
 
 import logging
 logger = logging.getLogger(__name__)
@@ -150,7 +152,8 @@ class AtomTokenizer:
             keep_hydrogen: bool = True,
             metal_known: bool = True,
             aggregate_uncommon: bool = False,
-            allow_unknown: bool = False
+            allow_unknown: bool = False,
+            name_or_path: Optional[str] = None
     ):
         self.atom_vocab = AtomVocabulary(
             metal_known=metal_known,
@@ -165,6 +168,70 @@ class AtomTokenizer:
 
         self.oh_size = self.atom_vocab.vocab_size + self.record_vocab.vocab_size
 
+        self.init_kwargs = {
+            "keep_hydrogen": keep_hydrogen,
+            "metal_known": metal_known, 
+            "aggregate_uncommon": aggregate_uncommon,
+            "allow_unknown": allow_unknown
+        }
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path: str, **kwargs):
+        """Load tokenizer from saved files.
+        
+        Args:
+            pretrained_model_name_or_path: Directory containing vocab files
+            **kwargs: Override saved config parameters
+        """
+        vocab_files = cls.get_vocab_files(pretrained_model_name_or_path)
+        
+        # Load config
+        with open(vocab_files["config_file"], "r") as f:
+            config = json.load(f)
+            
+        # Override with kwargs
+        config.update(kwargs)
+        
+        return cls(**config)
+
+    def save_pretrained(self, save_directory: str):
+        """Save tokenizer vocabulary and configuration.
+        
+        Args:
+            save_directory: Directory to save files
+        """
+        save_dir = Path(save_directory)
+        save_dir.mkdir(exist_ok=True)
+
+        # Save config
+        with open(save_dir / "tokenizer_config.json", "w") as f:
+            json.dump(self.init_kwargs, f, indent=2)
+
+    def get_vocab(self) -> Dict[str, int]:
+        """Get combined vocabulary mapping.
+        
+        Returns:
+            Dictionary mapping tokens to ids
+        """
+        vocab = {}
+        vocab.update(self.atom_vocab.stoi)
+        vocab.update(self.record_vocab.stoi)
+        return vocab
+
+    @staticmethod
+    def get_vocab_files(save_directory: str) -> Dict[str, str]:
+        """Get vocab file paths.
+        
+        Args:
+            save_directory: Directory containing vocab files
+            
+        Returns:
+            Dict mapping file types to paths
+        """
+        save_dir = Path(save_directory)
+        return {
+            "config_file": str(save_dir / "tokenizer_config.json"),
+        }
 
     def tokenize(self, atoms: List[List[str]], atom_types: List[List[str]]) -> Dict[str, torch.Tensor]:
         """Converts atom names and record types to integer tokens.
