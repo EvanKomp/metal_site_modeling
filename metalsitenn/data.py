@@ -190,8 +190,8 @@ class AtomicSystemBatchCollator:
                 output['original_pos'] = output['pos'].clone()
 
             noise_vectors = torch.zeros_like(output['pos'])
-            noise_vectors[noise_idx] = torch.randn(n_noise, 3)
-            output['pos'] = output['pos'] + noise_vectors * self.noise_scale
+            noise_vectors[noise_idx] = torch.randn(n_noise, 3) * self.noise_scale
+            output['pos'] = output['pos'] + noise_vectors
             output['denoise_vectors'] = noise_vectors * -1
             output['noise_mask'] = torch.zeros(num_atoms, dtype=torch.bool)
             output['noise_mask'][noise_idx] = True

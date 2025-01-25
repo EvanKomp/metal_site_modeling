@@ -1,16 +1,9 @@
 dvc
 pandas
-numpy<2.0
+numpy
 biopython
 matplotlib
 seaborn
-torch
-torch-scatter
-torch-cluster
-torch-geometric
 e3nn
-transformers
 biopandas
-datasets
 fairchem-core
-accelerate

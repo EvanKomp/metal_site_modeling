@@ -1,5 +1,22 @@
 # MetalSiteNN
 
+## Install
+Create a new conda environment:
+```bash
+conda create -n metalsitenn python=3.10
+```
+Install pytorch with conda a la https://pytorch.org/get-started/locally/
+
+You may need a different CUDA, no guarantee the model works.
+```bash
+conda install pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+```
+
+Install the package and additional dependancies like:
+```bash
+pip install -e .
+```
+
 ## Description
 A foundational model for protein metal binding sites using equivariant neural networks. Key features:
 - SO(3) equivariant architecture preserves 3D geometric symmetries, atoms represented by atom identity and atom type (ATM, HETATM)

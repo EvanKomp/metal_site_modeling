@@ -25,6 +25,35 @@ from metalsitenn.model import ModelOutput, MetalSitePretrainedModel
 import logging
 logger = logging.getLogger(__name__)
 
+def COMPUTE_LOSS_SELF_SUPERVISED_TRAINING(
+        trainer: "MetalSiteTrainer",
+        input_batch: Dict[str, torch.Tensor],
+        return_outputs: bool = False,
+    ) -> Dict[str, torch.Tensor]:
+    """Compute the loss for foundational training.
+
+    Returns the total loss and individual losses"""
+    out_dict = {}
+    model_outputs = trainer.model(**input_batch)
+    mask_loss = model_outputs.mask_loss if model_outputs.mask_loss is not None else 0
+    noise_loss = model_outputs.noise_loss if model_outputs.noise_loss is not None else 0
+    total_loss = (1 - trainer.args.frac_noise_loss) * mask_loss + trainer.args.frac_noise_loss * noise_loss
+
+    # normalize by the number of atoms
+    out_dict['loss'] = total_loss
+    out_dict['mask_loss'] = mask_loss
+    out_dict['noise_loss'] = noise_loss
+
+    if return_outputs:
+        out_dict['outputs'] = model_outputs
+
+    return out_dict
+
+COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING = {
+    'mask_loss': lambda outputs: outputs['mask_loss'],
+    'noise_loss': lambda outputs: outputs['noise_loss']
+}
+
 @dataclass(frozen=False)
 class MetalSiteTrainingArgs:
     """Arguments for training a MetalSite model.
@@ -44,6 +73,7 @@ class MetalSiteTrainingArgs:
     per_device_eval_batch_size: int = field(default=8, metadata={"help": "Batch size per GPU for evaluation."})
     gradient_accumulation_steps: int = field(default=1, metadata={"help": "Number of steps to accumulate gradients over."})
     dataloader_num_workers: int = field(default=0, metadata={"help": "Number of workers for dataloader."})
+    mixed_precision: str = field(default="no", metadata={"help": "Mixed precision training."})
     # optimizer
     learning_rate: float = field(default=5e-5, metadata={"help": "Learning rate for optimizer (Adam)."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for optimizer."})
@@ -97,6 +127,7 @@ class MetalSiteTrainer:
         train_dataset=None,
         eval_dataset=None,
         data_collator=None,
+        additional_eval_metrics: Optional[Dict[str, Callable]] = None
     ):
         """Initialize trainer instance.
         
@@ -117,14 +148,15 @@ class MetalSiteTrainer:
         # Initialize accelerator for distributed training
         self.accelerator = Accelerator(
             gradient_accumulation_steps=args.gradient_accumulation_steps,
-            gradient_clipping=args.gradient_clipping,
+            log_with="dvclive",
+            project_dir=args.output_dir,
+            mixed_precision=args.mixed_precision
         )
-        # get the number of devices from accelerator
-        self._num_devices = self.accelerator.num_processes
+        self.accelerator.init_trackers("metalsitenn")
 
         # Set up logging
         logging.basicConfig(
-            format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",  
+            format="TRAINER %(asctime)s - %(levelname)s - %(name)s - %(message)s",  
             level=logging.INFO,
             handlers=[logging.FileHandler(args.logging_file)]
         )
@@ -159,6 +191,8 @@ class MetalSiteTrainer:
             early_stopping_patience_counter=0
         )
 
+        self.additional_eval_metrics = additional_eval_metrics
+
     def _get_train_dataloader(self) -> DataLoader:
         """Create the training dataloader.
         
@@ -173,6 +207,7 @@ class MetalSiteTrainer:
             shuffle=True
         )
         logger.info(f"Created training dataloader with {len(dl)} batches.")
+        return dl
 
 
     def _get_eval_dataloader(self) -> DataLoader:
@@ -206,7 +241,7 @@ class MetalSiteTrainer:
         # Calculate key training quantities
         samples_per_step = (
             self.args.per_device_train_batch_size * 
-            self._num_devices * 
+            self.accelerator.num_processes * 
             self.args.gradient_accumulation_steps
         )
         steps_per_epoch = len(self.train_dataset) // samples_per_step
@@ -226,7 +261,7 @@ class MetalSiteTrainer:
         logger.info(
             f"\nTraining setup:"
             f"\n- Total dataset size: {len(self.train_dataset)}"
-            f"\n- Number of devices: {self._num_devices}"
+            f"\n- Number of devices: {self.accelerator.num_processes}"
             f"\n- Per device batch size: {self.args.per_device_train_batch_size}"
             f"\n- Gradient accumulation steps: {self.args.gradient_accumulation_steps}"
             f"\n- Effective batch size per step: {samples_per_step}"
@@ -237,17 +272,6 @@ class MetalSiteTrainer:
         )
         
         return optimizer, scheduler
-    
-    def _get_num_atoms_in_batch(self, batch):
-        """Get the number of atoms in a batch.
-        
-        Args:
-            batch: Dictionary of batch data
-        
-        Returns:
-            int: Number of atoms in the batch
-        """
-        return len(batch['atoms'])
     
     def compute_loss(self, input_batch: Dict[str, torch.Tensor], return_outputs: bool = False) -> Dict[str, torch.Tensor]:
         """Compute the loss for a training step.
@@ -260,6 +284,29 @@ class MetalSiteTrainer:
             Dictionary of losses and optionally model outputs
         """
         return self.compute_loss_fn(self, input_batch, return_outputs)
+    
+    def evaluate(self, metric_funcs=None):
+        # Use accelerator.log() instead of tracker directly
+        losses = []
+        for batch in self.eval_dataloader:
+            with torch.no_grad():
+                outputs = self.compute_loss(batch, return_outputs=True) 
+                loss = outputs["loss"]
+                losses.append(loss.detach())
+
+            if metric_funcs:
+                gathered_outputs = self.accelerator.gather_for_metrics(outputs)
+                for name, func in metric_funcs.items():
+                    try:
+                        metric_val = func(gathered_outputs)
+                        self.accelerator.log({f"eval/{name}": metric_val})
+                    except Exception as e:
+                        self.logger.warning(f"Failed to compute {name}: {e}")
+
+        losses = torch.stack(losses)
+        avg_loss = self.accelerator.gather_for_metrics(losses).mean().item()
+        self.accelerator.log({"eval/loss": avg_loss})
+        return avg_loss
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
         """Train the model with multi-GPU support via Accelerate."""
@@ -280,7 +327,9 @@ class MetalSiteTrainer:
             f"- Total steps: {num_total_steps}\n"
             f"- Steps per epoch: {num_update_steps_per_epoch}\n" 
             f"- Gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
-            f"- Number of devices: {self._num_devices}"
+            f"- Number of devices: {self.accelerator.num_processes}\n"
+            f"- Effective batch size: {self.args.per_device_train_batch_size * self.accelerator.num_processes * self.args.gradient_accumulation_steps}\n"
+            f"- Num trainable params: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}\n"
         )
 
         # Training loop
@@ -297,15 +346,12 @@ class MetalSiteTrainer:
                     outputs = self.compute_loss(batch)
                     loss = outputs["loss"]
                     
-                    # Scale loss by number of atoms and devices
-                    num_atoms = self._get_num_atoms_in_batch(batch) * self._num_devices
-                    loss = loss / num_atoms
-                    
                     self.accelerator.backward(loss)
                     
-                    # Only update on sync steps
                     if not self.accelerator.sync_gradients:
                         continue
+                    else:
+                        self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.gradient_clipping)
                         
                     self.optimizer.step()
                     self.lr_scheduler.step()
@@ -325,7 +371,7 @@ class MetalSiteTrainer:
 
                         # Evaluate and save if needed 
                         if self.args.eval_steps and self.state.global_step % self.args.eval_steps == 0:
-                            eval_loss = self.evaluate()
+                            eval_loss = self.evaluate(self.additional_eval_metrics)
                             self.model.train()
 
                             if eval_loss < self.state.best_metric:
@@ -363,32 +409,10 @@ class MetalSiteTrainer:
 
     def _load_checkpoint(self, location: str):
         """Load a checkpoint."""
+        os.makedirs(location, exist_ok=True)
         self.accelerator.load_state(os.path.join(location, "acc_checkpoint"))
         self.state = TrainerState.load(location)
 
     
-def compute_loss_foundational_training_loss(
-        self,
-        trainer: MetalSiteTrainer,
-        input_batch: Dict[str, torch.Tensor],
-        return_outputs: bool = False,
-    ) -> Dict[str, torch.Tensor]:
-    """Compute the loss for foundational training.
 
-    Returns the total loss and individual losses"""
-    out_dict = {}
-    model_outputs = trainer.model(**input_batch)
-    mask_loss = model_outputs.mask_loss if model_outputs.mask_loss is not None else 0
-    noise_loss = model_outputs.noise_loss if model_outputs.noise_loss is not None else 0
-    total_loss = (1 - trainer.args.frac_noise_loss) * mask_loss + trainer.args.frac_noise_loss * noise_loss
-
-    # normalize by the number of atoms
-    out_dict['loss'] = total_loss
-    out_dict['mask_loss'] = mask_loss
-    out_dict['noise_loss'] = noise_loss
-
-    if return_outputs:
-        out_dict['outputs'] = model_outputs
-
-    return out_dict
         

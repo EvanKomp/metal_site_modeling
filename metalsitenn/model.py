@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
 from transformers.configuration_utils import PretrainedConfig
+from torch_scatter import scatter
 
 from metalsitenn.nn import MetalSiteFoundationalBackbone, MetalSiteNodeHeadLayer
 
@@ -153,6 +154,7 @@ class MetalSiteNNConfig(PretrainedConfig):
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
         self.output_initial_embeddings = output_initial_embeddings
+        self.label_smoothing_factor = label_smoothing_factor
 
     def to_dict(self):
         """Convert config to dict, handling non-serializable objects"""
@@ -232,7 +234,7 @@ class MetalSitePretrainingOutput(ModelOutput):
         attentions: Optional List[[num_nodes, num_heads, num_nodes]] Attention weights
         hidden_states: Optional List[[num_nodes, irreps_node_feats.dim]] Node features
         mask_loss: Optional [] Masked atom prediction loss (sum)
-        coord_loss: Optional [] Coordinate prediction loss (sum)
+        noise_loss: Optional [] Coordinate prediction loss (sum)
     """
     atom_logits: torch.FloatTensor
     type_logits: torch.FloatTensor  
@@ -243,7 +245,7 @@ class MetalSitePretrainingOutput(ModelOutput):
     attentions: Optional[List[torch.FloatTensor]] = None
     hidden_states: Optional[List[torch.FloatTensor]] = None
     mask_loss: Optional[torch.FloatTensor] = None
-    coord_loss: Optional[torch.FloatTensor] = None
+    noise_loss: Optional[torch.FloatTensor] = None
 
     def __init__(
         self,
@@ -256,7 +258,7 @@ class MetalSitePretrainingOutput(ModelOutput):
         attentions: Optional[List[torch.FloatTensor]] = None,
         hidden_states: Optional[List[torch.FloatTensor]] = None,
         mask_loss: Optional[torch.FloatTensor] = None,
-        coord_loss: Optional[torch.FloatTensor] = None,
+        noise_loss: Optional[torch.FloatTensor] = None,
     ):
         super().__init__()
         self.atom_logits = atom_logits
@@ -268,7 +270,7 @@ class MetalSitePretrainingOutput(ModelOutput):
         self.attentions = attentions
         self.hidden_states = hidden_states
         self.mask_loss = mask_loss
-        self.coord_loss = coord_loss
+        self.noise_loss = noise_loss
         
 
 class MetalSitePretrainedModel(PreTrainedModel):
@@ -354,58 +356,28 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             atom_vocab_size=config.atom_vocab_size,
             atom_type_vocab_size=config.atom_type_vocab_size,
         )
-        self.cel = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor)
+        self.cel = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor,
+                                       reduction='none') 
 
-    def compute_mask_loss(
-            self,
-            atom_logits: torch.Tensor,
-            atom_labels: torch.Tensor,
-            mask_indices: torch.Tensor=None
-        ) -> torch.Tensor:
-        """Compute cross entropy loss for masked atom prediction.
-        
-        Args:
-            atom_logits: [num_nodes, vocab_size] Atom type predictions
-            atom_labels: [num_nodes] True atom tokens
-            mask_indices: [num_nodes] Boolean mask of masked positions, if passed only masked atoms are considered
-        """
-        if mask_indices is not None:
-            mask = mask_indices.bool()
-            return self.cel(
-                atom_logits[mask],
-                atom_labels[mask]
-            )
-        else:
-            return self.cel(
-                atom_logits,
-                atom_labels
-            )
+    def compute_mask_loss(self, atom_logits, atom_labels, mask_indices, batch_idx):
+        """Loss normalized per system"""
+        mask = mask_indices.bool()
+        # Compute loss per atom
+        per_atom_loss = self.cel(
+            atom_logits[mask],
+            atom_labels[mask],
+        )
+        # Mean within each system then mean across systems
+        # removes bias of large systems
+        system_losses = scatter(per_atom_loss, batch_idx[mask], reduce='mean')
+        return system_losses.mean()
     
-    def compute_coord_loss(
-            self,
-            output_vectors: torch.Tensor,
-            target_vectors: torch.Tensor,
-            loss_indices: torch.Tensor=None
-        ) -> torch.Tensor:
-        """Compute MSE loss for coordinate prediction.
-        
-        Args:
-            output_vectors: [num_nodes, 3] Predicted coordinate vectors
-            target_vectors: [num_nodes, 3] Target coordinate vectors
-            loss_indices: [num_nodes] Boolean mask for loss computation, if passed only selected atoms are considered
-        """
-        def get_loss(output_vectors, target_vectors):
-            # square and mean over the last dimension
-            losses = torch.sqrt(((output_vectors - target_vectors) ** 2).sum(dim=-1))
-            # mean over atoms
-            return losses.mean()
-
-        if loss_indices is not None:
-            mask = loss_indices.bool()
-            return get_loss(output_vectors[mask], target_vectors[mask])
-        
-        return get_loss(output_vectors, target_vectors)
-
+    def compute_noise_loss(self, output_vectors, target_vectors, loss_indices, batch_idx):
+        mask = loss_indices.bool()
+        per_atom_loss = torch.sqrt(((output_vectors[mask] - target_vectors[mask]) ** 2).sum(dim=-1))
+        system_losses = scatter(per_atom_loss, batch_idx[mask], reduce='mean') 
+        return system_losses.mean()
+    
     def forward(
             self,
             atoms: torch.Tensor,
@@ -451,17 +423,25 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             mask_loss = self.compute_mask_loss(
                 atom_logits=atom_logits,
                 atom_labels=atom_labels,
+                mask_indices=mask,  # Pass mask indices
+                batch_idx=batch_idx
             )
             mask_loss += self.compute_mask_loss(
                 atom_logits=type_logits,
                 atom_labels=atom_type_labels,
+                mask_indices=mask,  # Pass mask indices
+                batch_idx=batch_idx
             )
+            # divide by 2
+            mask_loss = mask_loss / 2
 
-        coord_loss = None
+        noise_loss = None
         if noise_mask is not None and denoise_vectors is not None:
-            coord_loss = self.compute_coord_loss(
+            noise_loss = self.compute_noise_loss(
                 output_vectors=output_vectors,
                 target_vectors=denoise_vectors,
+                loss_indices=noise_mask,
+                batch_idx=batch_idx
             )
 
         return MetalSitePretrainingOutput(
@@ -474,7 +454,7 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             attentions=backbone_out.attentions,
             hidden_states=backbone_out.hidden_states,
             mask_loss=mask_loss,
-            coord_loss=coord_loss
+            noise_loss=noise_loss
         )
 
                 
