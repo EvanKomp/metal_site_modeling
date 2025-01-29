@@ -149,15 +149,17 @@ class EarlyStoppingState:
     def step(self, metric: float, current_step: int, min_improvement: float) -> bool:
         """Returns True if should stop."""
         improvement = (self.best_metric - metric) / self.best_metric
+        if improvement > min_improvement:
+            self.counter = 0
+            bad_step =  False
+        else:
+            bad_step = True
+            self.counter += 1
+            logger.info(f"Early stopping counter triggered: {self.counter}, best metric: {self.best_metric}, current metric: {metric}, improvement: {improvement}, min improvement: {min_improvement}")
         if metric < self.best_metric:
             self.best_metric = metric
             self.best_step = current_step
-        if improvement > min_improvement:
-            self.counter = 0
-            return False
-        self.counter += 1
-        logger.info(f"Early stopping counter triggered: {self.counter}, best metric: {self.best_metric}, current metric: {metric}, improvement: {improvement}, min improvement: {min_improvement}")
-        return True
+        return bad_step
 
 @dataclass
 class MetalSiteTrainingArgs:

@@ -138,7 +138,7 @@ stages:
         training.dataloader_num_workers: 1
         training.debug_sample: 500
         training.early_stopping_improvement_fraction: 0.01
-        training.early_stopping_patience: 10
+        training.early_stopping_patience: 5
         training.eval_steps: 20
         training.frac_noise_loss: 0.5
         training.gradient_accumulation_steps: 2
@@ -149,7 +149,7 @@ stages:
         training.mask_rate: 0.15
         training.noise_rate: 0.15
         training.noise_scale: 1.0
-        training.num_epochs: 1
+        training.num_epochs: 20
         training.per_device_batch_size: 4
         training.use_early_stopping: true
         training.warmup_pct: 0.1
@@ -157,29 +157,29 @@ stages:
     outs:
     - path: data/model_pretraining/checkpoints
       hash: md5
-      md5: 128988c7f57de8d3cc1f97c8d30765ed.dir
-      size: 6280862
-      nfiles: 42
+      md5: 59f345353a72f5dc547bb72df7727f10.dir
+      size: 4486330
+      nfiles: 30
     - path: data/model_pretraining/dvclive/metrics.json
       hash: md5
-      md5: 07af2a751b6057f67e65066ea43b1ba7
-      size: 358
+      md5: 90952589cd9a2e23eb5845878f03ad5b
+      size: 363
     - path: data/model_pretraining/dvclive/plots/custom/eval_2d_space.json
       hash: md5
-      md5: c6005b010edbae02bda27d2531bb6dac
-      size: 38959
+      md5: ac559479830ef8dc90aa173782abf183
+      size: 39006
     - path: data/model_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: d83a4a6c6dff24ebcb308ed5f06c92e2.dir
-      size: 960
+      md5: fd3fba5426efa4dc3e5caee17adbde02.dir
+      size: 825
       nfiles: 8
     - path: data/model_pretraining/eval_2d_space
       hash: md5
-      md5: 6427a6ce1e417f42c3ade595375b89fe.dir
-      size: 72621
-      nfiles: 6
+      md5: 4d52c59d10e6725ff18089e620eb5121.dir
+      size: 60701
+      nfiles: 5
     - path: data/model_pretraining/final_model
       hash: md5
-      md5: e2b03c8de79b4a30d9f5742d75011270.dir
+      md5: 2192c270c8c96abc39e460b90b768175.dir
       size: 286383
       nfiles: 2

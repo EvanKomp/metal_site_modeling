@@ -29,7 +29,7 @@ training:
   logging_steps: 20 # Number of steps to log training metrics
   load_best_model_at_end: true # Load the best model at the end of training
 
-  num_epochs: 1 # Number of epochs to train for
+  num_epochs: 20 # Number of epochs to train for
   per_device_batch_size: 4 # Number of MFS systems per batch
   gradient_accumulation_steps: 2 # Number of steps to accumulate gradients over
   dataloader_num_workers: 1 # Number of workers to use for data loading
@@ -39,7 +39,7 @@ training:
   frac_noise_loss: 0.5 # Fraction of loss to delegate to noise loss
   warmup_pct: .1 # Number of steps to linearly increase learning rate for
   use_early_stopping: true # Use early stopping based on validation loss
-  early_stopping_patience: 10 # Number of steps to wait before stopping training
+  early_stopping_patience: 5 # Number of steps to wait before stopping training
   early_stopping_improvement_fraction: 0.01 # Minimum improvement in validation loss to continue training
 
 embedding:
