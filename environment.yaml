@@ -1,0 +1,27 @@
+name: metal
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch
+  - pytorch::torchvision
+  - torchaudio
+  - pytorch_geometric
+  - pytorch-cuda=12.1 # change as necessary
+  - accelerate
+  - transformers
+  - torch-scatter
+  - datasets
+  - pip:
+      - dvc
+      - pandas
+      - numpy<2.0
+      - biopython
+      - matplotlib
+      - seaborn
+      - e3nn
+      - biopandas
+      - fairchem-core

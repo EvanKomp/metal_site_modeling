@@ -49,7 +49,12 @@ class PDBReader:
             atoms: List of base elements (e.g. 'C', 'N')
             atom_types: List of ATOM/HETATM record types
         """
-        structure = self.parser.read_pdb(pdb_path)
+        try:
+            structure = self.parser.read_pdb(pdb_path)
+        except Exception as e:
+            logger.error(f"Error reading {pdb_path}: {e}")
+            return None
+
         df = pd.concat([structure.df['ATOM'], structure.df['HETATM']])
         if self.deprotonate:
             df = df[~(df['element_symbol'].isin(['H', 'D']))]
@@ -72,6 +77,8 @@ class PDBReader:
         for file in os.listdir(pdb_dir):
             if file.endswith(".pdb"):
                 outs = self.read(os.path.join(pdb_dir, file))
+                if outs is None:
+                    continue
                 outs['id'] = file.split('.')[0]
                 if self.skip_only_hetatm and all([x == 'HETATM' for x in outs['atom_types']]):
                     continue
@@ -132,6 +139,7 @@ class AtomicSystemBatchCollator:
         self.already_tokenized = already_tokenized
         self.return_original_pos = return_original_pos
         self.tokenizer = tokenizer
+        self._checked_already_tokenized = False
 
     def _standardize_batch(self, batch: Union[Dict[str, List[Any]], List[Dict[str, Any]]]) -> Dict[str, List[Any]]:
         """Convert both input formats to dictionary of lists format."""
@@ -161,6 +169,15 @@ class AtomicSystemBatchCollator:
         if not self.already_tokenized:
             batch['atoms'] = [self.tokenizer.encode(x) for x in batch['atoms']]
             batch['atom_types'] = [self.tokenizer.encode(x) for x in batch['atom_types']]
+        else:
+            if not self._checked_already_tokenized:
+                # check that the incoming data is the correct form
+                try:
+                    outs_ = self.tokenizer.decode(atoms=batch['atoms'], atom_types=batch['atom_types'])
+                    logger.debug(f"Data appears to be properly tokenized already, first batch: {outs_}")
+                except:
+                    raise ValueError("Could not decode data, is it actually already tokenized?")
+                self._checked_already_tokenized=True
 
         output = {
             'atoms': torch.cat([torch.tensor(x) for x in batch['atoms']]),

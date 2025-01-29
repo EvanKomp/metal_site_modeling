@@ -21,3 +21,155 @@ stages:
       hash: md5
       md5: ec0d15f08c081acc9d39eb7902bf1105
       size: 8570349
+  1.2_create_dataset:
+    cmd: python pipeline/1.2_create_dataset.py
+    deps:
+    - path: data/mf_sites
+      hash: md5
+      md5: 73e0b7eee217068d63aee98df6740fac.dir
+      size: 5383821905
+      nfiles: 314920
+    - path: pipeline/1.2_create_dataset.py
+      hash: md5
+      md5: 13b38ed5d28e3af40ee6d3be769575ab
+      size: 4261
+    params:
+      params.yaml:
+        data.aggregate_uncommon: true
+        data.metal_known: false
+        data.model_hydrogens: false
+        data.test_frac: 0.05
+    outs:
+    - path: data/dataset/metal_site_dataset
+      hash: md5
+      md5: 073db9a3f1ea26223777c3abbf416dd7.dir
+      size: 3291760765
+      nfiles: 13
+    - path: data/dataset/tokenizer.pkl
+      hash: md5
+      md5: e4cb0108e6ed191e680ac8230f4faa40
+      size: 1188
+  1.3_get_avg_num_neighbors:
+    cmd: python pipeline/1.3_get_avg_num_neighbors.py
+    deps:
+    - path: data/dataset/metal_site_dataset
+      hash: md5
+      md5: 073db9a3f1ea26223777c3abbf416dd7.dir
+      size: 3291760765
+      nfiles: 13
+    - path: pipeline/1.3_get_avg_num_neighbors.py
+      hash: md5
+      md5: 80965d7f67a61a456083685eee554bfe
+      size: 1757
+    params:
+      params.yaml:
+        model.max_radius: 5
+    outs:
+    - path: data/training_avg_num_neighbors.json
+      hash: md5
+      md5: 2e0f6cdceda6ccf3427e128194a9de83
+      size: 40
+  1.1_parse_site_data:
+    cmd: python pipeline/1.1_parse_site_data.py
+    deps:
+    - path: data/mf_sites
+      hash: md5
+      md5: 73e0b7eee217068d63aee98df6740fac.dir
+      size: 5383821905
+      nfiles: 314920
+    - path: pipeline/1.1_parse_site_data.py
+      hash: md5
+      md5: 40a13842e8d48e14435421639d2e3152
+      size: 2940
+    outs:
+    - path: data/metrics/site_label_metrics.json
+      hash: md5
+      md5: 6fb44b5fced884503be1d47508145ff3
+      size: 99
+    - path: data/site_labels.csv
+      hash: md5
+      md5: ec0d15f08c081acc9d39eb7902bf1105
+      size: 8570349
+  2.1_self_supervised_training:
+    cmd: accelerate launch pipeline/2.1_self_supervised_training.py
+    deps:
+    - path: data/dataset/metal_site_dataset
+      hash: md5
+      md5: 073db9a3f1ea26223777c3abbf416dd7.dir
+      size: 3291760765
+      nfiles: 13
+    - path: data/dataset/tokenizer.pkl
+      hash: md5
+      md5: e4cb0108e6ed191e680ac8230f4faa40
+      size: 1188
+    - path: data/training_avg_num_neighbors.json
+      hash: md5
+      md5: 2e0f6cdceda6ccf3427e128194a9de83
+      size: 40
+    - path: pipeline/2.1_self_supervised_training.py
+      hash: md5
+      md5: 9f333f5c506b98e76a6a47bf13129c87
+      size: 6604
+    params:
+      params.yaml:
+        embedding.hdbscan_alpha: 1.0
+        embedding.hdbscan_min_cluster_size: 5
+        embedding.hdbscan_min_samples: 5
+        embedding.hidden_state: -1
+        embedding.how: <METAL>_mean
+        embedding.tsne_learning_rate: auto
+        embedding.tsne_n_iter: 1000
+        embedding.tsne_perplexity: 30
+        model.alpha_drop: 0.1
+        model.atom_embed_dim: 32
+        model.drop_path_rate: 0.0
+        model.fc_neurons:
+        - 32
+        - 32
+        model.hidden_scale: 12
+        model.hidden_scale_decay: 0.2
+        model.l: 1
+        model.label_smoothing_factor: 0.1
+        model.max_radius: 5
+        model.num_basis: 32
+        model.num_heads: 4
+        model.num_layers: 2
+        model.proj_drop: 0.0
+        training.dataloader_num_workers: 1
+        training.debug_sample: 2000
+        training.early_stopping_improvement_fraction: 0.01
+        training.early_stopping_patience: 10
+        training.eval_steps: 100
+        training.frac_noise_loss: 0.5
+        training.gradient_accumulation_steps: 2
+        training.gradient_clipping: 1.0
+        training.learning_rate: 0.0001
+        training.load_best_model_at_end: true
+        training.logging_steps: 20
+        training.mask_rate: 0.15
+        training.noise_rate: 0.15
+        training.noise_scale: 1.0
+        training.num_epochs: 1
+        training.per_device_batch_size: 4
+        training.use_early_stopping: true
+        training.warmup_steps: 100
+        training.weight_decay: 0.001
+    outs:
+    - path: data/model_pretraining
+      hash: md5
+      md5: ed0bb8d452581d5196221ee40607cb84.dir
+      size: 5090890
+      nfiles: 46
+    - path: data/model_pretraining/dvclive/metrics.json
+      hash: md5
+      md5: b8ab7ff8808cb032ab85a13d6e0a1c1b
+      size: 337
+    - path: data/model_pretraining/dvclive/plots/custom/eval_2d_space.json
+      hash: md5
+      md5: 9768372bc61a704dc3b281f7ace2bf2c
+      size: 155936
+    - path: data/model_pretraining/dvclive/plots/metrics
+      hash: md5
+      md5: fdaac137f1839e27e4ef3ff956eda8ed.dir
+      size: 1371
+      nfiles: 8

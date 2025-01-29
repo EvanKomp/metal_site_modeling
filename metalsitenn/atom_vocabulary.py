@@ -70,7 +70,11 @@ class BaseVocabulary:
         elif isinstance(tokens, torch.Tensor):
             return [self.itos.get(t.item(), None) for t in tokens]
         elif hasattr(tokens, '__iter__'):
-            return [self.itos.get(t, None) for t in tokens]
+            # asuming an iter of tokens as opposed to an iter of iter
+            if isinstance(tokens[0], (int, np.integer)):
+                return [self.itos.get(t, None) for t in tokens]
+            elif hasattr(tokens[0], '__iter__'):
+                return [self.decode(t) for t in tokens]
 
 class AtomVocabulary(BaseVocabulary):
     """Maps atomic identities to integer tokens.

@@ -2,41 +2,52 @@ data:
   model_hydrogens: false # Include hydrogen atoms in model
   metal_known: false # Use unique tokens for metals vs generic METAL token
   aggregate_uncommon: true # Aggregate uncommon atom types into a single token
-  test_frac: 0.1 # Fraction of data to use for testing
+  test_frac: 0.05 # Fraction of data to use for testing
 
 model:
   l: 1 # Maximum order of irreps to consider within the model
-  hidden_scale: 64 # base multiplicity for l=0 irreps, eg. Xe0 + Xo0 + ...
-  hidden_scale_decay: 0.5 # Multiplicative decay factor for each additional l, eg. Xe1 = Xe0 * hidden_scale_decay
-  num_heads: 8 # Number of attention heads within each transformer block
-  atom_embed_dim: 64 # Dimensionality of atom embeddings each for atoms and atom types
-  max_radius: 6 # Maximum distance to consider for interactions Angstroms
+  hidden_scale: 12 # base multiplicity for l=0 irreps, eg. Xe0 + Xo0 + ...
+  hidden_scale_decay: 0.2 # Multiplicative decay factor for each additional l, eg. Xe1 = Xe0 * hidden_scale_decay
+  fc_neurons: [32, 32] # Number of neurons in each fully connected layer
+  num_heads: 4 # Number of attention heads within each transformer block
+  atom_embed_dim: 32 # Dimensionality of atom embeddings each for atoms and atom types
+  max_radius: 5 # Maximum distance to consider for interactions Angstroms
   num_basis: 32 # Number of basis functions to use for radial basis functions
   num_layers: 2 # Number of transformer layers
   alpha_drop: 0.1 # Dropout rate for aattention heads
-  proj_drop: 0.1 # Dropout rate for projection layers
-  drop_path_rate: 0.1 # Drop path rate for stochastic depth
+  proj_drop: 0.0 # Dropout rate for projection layers
+  drop_path_rate: 0.0 # Drop path rate for stochastic depth
   label_smoothing_factor: 0.1 # Label smoothing factor for cross entropy loss
 
 training:
+  debug_sample: 2000 # Number of samples to use for debugging
   mask_rate: 0.15 # Fraction of atoms to mask during training
   noise_rate: 0.15 # Fraction of coordinates to noise during training
   noise_scale: 1.0 # Standard deviation of noise to apply to coordinates - Units of Angstrom.
 
-  eval_steps: 1000 # Number of steps to evaluate model on validation set (and save a checkpoint)
-  logging_steps: 100 # Number of steps to log training metrics
+  eval_steps: 100 # Number of steps to evaluate model on validation set (and save a checkpoint)
+  logging_steps: 20 # Number of steps to log training metrics
   load_best_model_at_end: true # Load the best model at the end of training
 
-  num_epochs: 100 # Number of epochs to train for
+  num_epochs: 1 # Number of epochs to train for
   per_device_batch_size: 4 # Number of MFS systems per batch
   gradient_accumulation_steps: 2 # Number of steps to accumulate gradients over
-  mixed_precision: 'no' # Use mixed precision training
   dataloader_num_workers: 1 # Number of workers to use for data loading
   learning_rate: 1e-4 # Learning rate for Adam optimizer
-  weight_decay: 1e-2 # Weight decay for Adam optimizer
+  weight_decay: 1e-3 # Weight decay for Adam optimizer
   gradient_clipping: 1.0 # Gradient clipping value
   frac_noise_loss: 0.5 # Fraction of loss to delegate to noise loss
   warmup_steps: 100 # Number of steps to linearly increase learning rate for
   use_early_stopping: true # Use early stopping based on validation loss
   early_stopping_patience: 10 # Number of steps to wait before stopping training
   early_stopping_improvement_fraction: 0.01 # Minimum improvement in validation loss to continue training
+
+embedding:
+  how: "<METAL>_mean"
+  hidden_state: -1
+  hdbscan_min_cluster_size: 5
+  hdbscan_min_samples: 5
+  hdbscan_alpha: 1.0
+  tsne_perplexity: 30
+  tsne_learning_rate: auto
+  tsne_n_iter: 1000

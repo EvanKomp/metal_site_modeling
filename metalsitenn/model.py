@@ -13,6 +13,7 @@ import torch
 from e3nn import o3
 import math
 from dataclasses import dataclass
+import numpy as np
 
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
@@ -22,6 +23,9 @@ from torch_scatter import scatter
 from metalsitenn.nn import MetalSiteFoundationalBackbone, MetalSiteNodeHeadLayer
 
 from typing import List, Optional
+
+import logging
+logger = logging.getLogger(__name__)
 
 # a helper function to generate the irreps for the model
 def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple[o3.Irreps, o3.Irreps]:
@@ -196,29 +200,12 @@ class MetalSiteFoundationalOutput(ModelOutput):
         hidden_states: Optional List[[num_nodes, irreps_node_feats.dim]]
             Node features from each layer
     """
-    node_feats: torch.FloatTensor
-    node_attr: torch.FloatTensor
-    edge_attr: torch.FloatTensor
-    edge_embedding: torch.FloatTensor
+    node_feats: torch.FloatTensor = None
+    node_attr: torch.FloatTensor = None
+    edge_attr: torch.FloatTensor = None
+    edge_embedding: torch.FloatTensor = None
     attentions: Optional[List[torch.FloatTensor]] = None
     hidden_states: Optional[List[torch.FloatTensor]] = None
-
-    def __init__(
-        self,
-        node_feats: torch.FloatTensor,
-        node_attr: torch.FloatTensor,
-        edge_attr: torch.FloatTensor,
-        edge_embedding: torch.FloatTensor,
-        attentions: Optional[List[torch.FloatTensor]] = None,
-        hidden_states: Optional[List[torch.FloatTensor]] = None,
-    ):
-        super().__init__()
-        self.node_feats = node_feats
-        self.node_attr = node_attr
-        self.edge_attr = edge_attr 
-        self.edge_embedding = edge_embedding
-        self.attentions = attentions
-        self.hidden_states = hidden_states
     
 @dataclass
 class MetalSitePretrainingOutput(ModelOutput):
@@ -236,9 +223,9 @@ class MetalSitePretrainingOutput(ModelOutput):
         mask_loss: Optional [] Masked atom prediction loss (sum)
         noise_loss: Optional [] Coordinate prediction loss (sum)
     """
-    atom_logits: torch.FloatTensor
-    type_logits: torch.FloatTensor  
-    output_vectors: torch.FloatTensor
+    atom_logits: torch.FloatTensor = None
+    type_logits: torch.FloatTensor = None
+    output_vectors: torch.FloatTensor = None
     edge_attr: Optional[torch.FloatTensor] = None
     edge_embedding: Optional[torch.FloatTensor] = None
     node_attr: Optional[torch.FloatTensor] = None
@@ -246,32 +233,7 @@ class MetalSitePretrainingOutput(ModelOutput):
     hidden_states: Optional[List[torch.FloatTensor]] = None
     mask_loss: Optional[torch.FloatTensor] = None
     noise_loss: Optional[torch.FloatTensor] = None
-
-    def __init__(
-        self,
-        atom_logits: torch.FloatTensor,
-        type_logits: torch.FloatTensor,
-        output_vectors: torch.FloatTensor,
-        edge_attr: Optional[torch.FloatTensor] = None,
-        edge_embedding: Optional[torch.FloatTensor] = None,
-        node_attr: Optional[torch.FloatTensor] = None,
-        attentions: Optional[List[torch.FloatTensor]] = None,
-        hidden_states: Optional[List[torch.FloatTensor]] = None,
-        mask_loss: Optional[torch.FloatTensor] = None,
-        noise_loss: Optional[torch.FloatTensor] = None,
-    ):
-        super().__init__()
-        self.atom_logits = atom_logits
-        self.type_logits = type_logits
-        self.output_vectors = output_vectors
-        self.edge_attr = edge_attr
-        self.edge_embedding = edge_embedding
-        self.node_attr = node_attr
-        self.attentions = attentions
-        self.hidden_states = hidden_states
-        self.mask_loss = mask_loss
-        self.noise_loss = noise_loss
-        
+     
 
 class MetalSitePretrainedModel(PreTrainedModel):
     """
@@ -340,6 +302,89 @@ class MetalSiteFoundationalModel(MetalSitePretrainedModel):
         )
         
         return MetalSiteFoundationalOutput(**outputs)
+    
+    def embed_systems(
+            self,
+            atoms,
+            atom_types,
+            pos,
+            batch_idx,
+            tokenizer,
+            atom_labels: Optional[torch.Tensor] = None,
+            hidden_state: int = -1,
+            how: str='<METAL>_mean', **kwargs):
+        """Embed atomic data for a set of systems.
+        
+        Args:
+            atoms: [num_atoms] Atom type tokens
+            atom_types: [num_atoms] Record type tokens
+            pos: [num_atoms, 3] Node coordinates
+            batch_idx: [num_atoms] Batch assignments
+            tokenizer: AtomTokenizer
+                Tokenizer for embeddings - needed to de-tokenize and see which tokens to use
+            how: str = '<METAL>_mean'
+                Aggregation method for system embeddings
+                First string is 'all' or a particular token to consider for embeddings
+                Second string an aggregation method eg. 'mean', 'sum', 'max'
+            atom_labels: Optional [num_atoms] True atom tokens. Used for indexing if available
+            hidden_state: int = -1
+                Hidden state index to use for embeddings
+        Returns:
+            MetalSiteFoundationalOutput containing node features and attributes
+        """
+        # set such that hidden states are returned
+        self.backbone.output_hidden_states = True
+
+        # Forward through backbone
+        outputs = self.forward(
+            atoms=atoms,
+            atom_types=atom_types,
+            pos=pos,
+            batch_idx=batch_idx,
+            **kwargs
+        )
+
+        # Extract hidden states
+        hidden_states = outputs.hidden_states[hidden_state]
+        # get only scalar embeddings
+        # the others are higher order tensors
+        embedding_indexes = self.backbone.irreps_node_output.ls == 0
+
+        # Get embeddings for atoms and atom types
+        hidden_states = hidden_states[:, embedding_indexes]
+        if atom_labels is not None:
+            tokens_to_index = atom_labels
+        else:
+            tokens_to_index = atoms
+
+        # de tokenize the embeddings
+        token_strings = tokenizer.decode(atoms=tokens_to_index)
+        # get the embeddings for the tokens
+        token_to_target, mean_type = how.split('_')
+        if token_to_target == 'all':
+            pass
+        else:
+            # ensure token is in tokenizer
+            assert token_to_target in tokenizer.atom_vocab, f"{token_to_target} not in tokenizer"
+            # get embeddings for only the target token
+            correct_token_mask = token_strings == token_to_target
+            hidden_states = hidden_states[correct_token_mask]
+            batch_idx = batch_idx[correct_token_mask]
+
+        # Aggregate embeddings
+        if mean_type == 'mean':
+            embeddings = scatter(hidden_states, batch_idx, reduce='mean')
+        elif mean_type == 'sum':
+            embeddings = scatter(hidden_states, batch_idx, reduce='sum')
+        elif mean_type == 'max':
+            embeddings = scatter(hidden_states, batch_idx, reduce='max')
+        else:
+            raise ValueError(f"Invalid aggregation method: {mean_type}")
+        
+        self.backbone.output_hidden_states = False
+        
+        return embeddings
+
 
 
 class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
@@ -434,6 +479,8 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             )
             # divide by 2
             mask_loss = mask_loss / 2
+        else:
+            logger.debug("No mask loss computed")
 
         noise_loss = None
         if noise_mask is not None and denoise_vectors is not None:
@@ -443,6 +490,8 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
                 loss_indices=noise_mask,
                 batch_idx=batch_idx
             )
+        else:
+            logger.debug("No noise loss computed")
 
         return MetalSitePretrainingOutput(
             atom_logits=atom_logits,
@@ -456,5 +505,98 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             mask_loss=mask_loss,
             noise_loss=noise_loss
         )
+    
+    def embed_systems(
+            self,
+            atoms,
+            atom_types,
+            pos,
+            batch_idx,
+            tokenizer,
+            atom_labels: Optional[torch.Tensor] = None,
+            hidden_state: int = -1,
+            how: str='<METAL>_mean', **kwargs):
+        """Embed atomic data for a set of systems.
+        
+        Args:
+            atoms: [num_atoms] Atom type tokens
+            atom_types: [num_atoms] Record type tokens
+            pos: [num_atoms, 3] Node coordinates
+            batch_idx: [num_atoms] Batch assignments
+            tokenizer: AtomTokenizer
+                Tokenizer for embeddings - needed to de-tokenize and see which tokens to use
+            how: str = '<METAL>_mean'
+                Aggregation method for system embeddings
+                First string is 'all' or a particular token to consider for embeddings
+                Second string an aggregation method eg. 'mean', 'sum', 'max'
+            atom_labels: Optional [num_atoms] True atom tokens. Used for indexing if available
+            hidden_state: int = -1
+                Hidden state index to use for embeddings
+        Returns:
+            MetalSiteFoundationalOutput containing node features and attributes
+        """
+        # set such that hidden states are returned
+        self.backbone.backbone.output_hidden_states = True
+
+        # Forward through backbone
+        outputs = self.forward(
+            atoms=atoms,
+            atom_types=atom_types,
+            pos=pos,
+            batch_idx=batch_idx,
+            **kwargs
+        )
+
+        # Extract hidden states
+        hidden_states = outputs.hidden_states[hidden_state]
+        # get only scalar embeddings
+        # the others are higher order tensors
+        is_l_zero = []
+        for mul, ir in self.backbone.backbone.irreps_node_output:
+            if ir.l == 0:
+                is_l_zero.extend([True] * ir.dim * mul)
+            else:
+                is_l_zero.extend([False] * ir.dim * mul)
+        embedding_indexes = torch.tensor(is_l_zero)
+
+        # Get embeddings for atoms and atom types
+        hidden_states = hidden_states[:, embedding_indexes]
+        if atom_labels is not None:
+            tokens_to_index = atom_labels
+        else:
+            tokens_to_index = atoms
+
+        # de tokenize the embeddings
+        token_strings = tokenizer.decode(atoms=tokens_to_index)['atoms']
+        # convert to array if not already
+        token_strings = np.array(token_strings)
+        # get the embeddings for the tokens
+        token_to_target, mean_type = how.split('_')
+        if token_to_target == 'all':
+            pass
+        else:
+            # ensure token is in tokenizer
+            assert token_to_target in list(tokenizer.atom_vocab.itos.values()), f"{token_to_target} not in tokenizer"
+            # get embeddings for only the target token
+            correct_token_mask = token_strings == token_to_target
+            hidden_states = hidden_states[correct_token_mask]
+            batch_idx = batch_idx[correct_token_mask]
+
+        # Aggregate embeddings
+        # use multiple of present
+        embeddings_to_cat = []
+        if 'mean' in mean_type:
+            embeddings_to_cat.append(scatter(hidden_states, batch_idx, dim=0, reduce='mean'))
+        if 'sum' in mean_type:
+            embeddings_to_cat.append(scatter(hidden_states, batch_idx, dim=0, reduce='sum'))
+        if 'max' in mean_type:
+            embeddings_to_cat.append(scatter(hidden_states, batch_idx, dim=0, reduce='max'))
+        if 'min' in mean_type:
+            embeddings_to_cat.append(scatter(hidden_states, batch_idx, dim=0, reduce='min'))
+        embeddings = torch.cat(embeddings_to_cat, dim=-1)
+        
+        self.backbone.backbone.output_hidden_states = False
+        
+        return embeddings
 
                 

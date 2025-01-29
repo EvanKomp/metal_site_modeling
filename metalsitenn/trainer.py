@@ -8,21 +8,17 @@
 We cannot use a HF default trainer due to the way batches are formatted differently, but
 use their nomenclature and functionality when applicable.
 '''
-from dataclasses import dataclass, field, asdict
-import json
+from dataclasses import dataclass, asdict, field
 import os
+import logging
+from typing import Optional, Dict, Any, Callable
 
-from accelerate import Accelerator
+import torch 
 from torch.utils.data import DataLoader
-import torch
-from transformers import get_linear_schedule_with_warmup
+from transformers import get_scheduler
+from accelerate import Accelerator
 from tqdm import tqdm
 
-from typing import Optional, List, Dict, Callable
-
-from metalsitenn.model import ModelOutput, MetalSitePretrainedModel
-
-import logging
 logger = logging.getLogger(__name__)
 
 def COMPUTE_LOSS_SELF_SUPERVISED_TRAINING(
@@ -34,9 +30,15 @@ def COMPUTE_LOSS_SELF_SUPERVISED_TRAINING(
 
     Returns the total loss and individual losses"""
     out_dict = {}
+    assert input_batch['mask'] is not None
+    assert input_batch['atom_labels'] is not None
     model_outputs = trainer.model(**input_batch)
-    mask_loss = model_outputs.mask_loss if model_outputs.mask_loss is not None else 0
-    noise_loss = model_outputs.noise_loss if model_outputs.noise_loss is not None else 0
+    if model_outputs.mask_loss is None:
+        raise ValueError("Mask loss is required for foundational training")
+    if model_outputs.noise_loss is None:
+        raise ValueError("Noise loss is required for foundational training")
+    mask_loss = model_outputs.mask_loss
+    noise_loss = model_outputs.noise_loss
     total_loss = (1 - trainer.args.frac_noise_loss) * mask_loss + trainer.args.frac_noise_loss * noise_loss
 
     # normalize by the number of atoms
@@ -49,76 +51,165 @@ def COMPUTE_LOSS_SELF_SUPERVISED_TRAINING(
 
     return out_dict
 
+"""Metrics used during evaluation that require additional computation."""
+def NO_MASKING_EMBED_AND_CLUSTER(
+        trainer: "MetalSiteTrainer",
+        embedding_how: str = "<METAL>_mean",
+        hidden_state: int = -1,
+        cluster_kwargs: Dict[str, Any] = {},
+        tsne_kwargs: Dict[str, Any] = {}
+    ) -> Dict[str, torch.Tensor]:
+    """Compute embeddings using the model, use them to cluster, and see how well clusters pop out.
+    
+    This metric requires batch manipulation so is called seperately from the eval loop.
+    """
+    eval_dataloader = trainer.eval_dataloader
+    embeddings_all = []
+    for batch in eval_dataloader:
+        with torch.no_grad():
+
+            # update the batch to use actual tokens instead of masks and actual positions
+            batch['atoms'] = batch['atom_labels']
+            batch['atom_types'] = batch['atom_type_labels']
+            batch['pos'] = batch['pos'] + batch['denoise_vectors']
+
+            # get the embeddings
+            embeddings = trainer.model.embed_systems(
+                atoms=batch['atoms'],
+                atom_types=batch['atom_types'],
+                pos=batch['pos'],
+                batch_idx=batch['batch_idx'],
+                tokenizer=trainer.data_collator.tokenizer,
+                hidden_state=hidden_state,
+                how=embedding_how
+            )
+
+            gathered_embeddings = trainer.accelerator.gather(embeddings)
+            embeddings_all.append(gathered_embeddings.cpu())
+
+    embeddings_all = torch.cat(embeddings_all, dim=0).numpy()
+
+    if trainer.accelerator.is_main_process:
+
+        # cluster the embeddings
+        from sklearn.cluster import HDBSCAN
+        clusterer = HDBSCAN(**cluster_kwargs)
+
+        # fit the clusterer
+        clusterer.fit(embeddings_all)
+
+        # get the sillhouette score and log it
+        from sklearn.metrics import silhouette_score
+        score = silhouette_score(embeddings_all, clusterer.labels_)
+        trainer.accelerator.log({"eval/silhouette_score": score})
+
+        # lower dimensions using tsne
+        from sklearn.manifold import TSNE
+        import pandas as pd
+        tsne = TSNE(n_components=2, random_state=42, **tsne_kwargs)
+        embeddings_2d = tsne.fit_transform(embeddings_all)
+        datapoints_df = pd.DataFrame(embeddings_2d, columns=['x', 'y'])
+
+        # log a plot of the 2d space directly through dvc live
+        trainer.accelerator.get_tracker('dvclive', unwrap=True).log_plot(
+            "eval_2d_space",
+            datapoints_df,
+            x='x',
+            y='y',
+            template='scatter'
+        )
+    return
+
+"""Metrics used during evaluation that can be computed directly from model loss outputs."""
 COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING = {
-    'mask_loss': lambda outputs: outputs['mask_loss'],
-    'noise_loss': lambda outputs: outputs['noise_loss']
+    'mask_loss': lambda outputs: outputs['mask_loss'].item(),
+    'noise_loss': lambda outputs: outputs['noise_loss'].item()
 }
 
-@dataclass(frozen=False)
-class MetalSiteTrainingArgs:
-    """Arguments for training a MetalSite model.
-    
-    Follows the huggingface nomenclature and functionality.
-    """
-    # pathing
-    output_dir: str = field(default="./training_output", metadata={"help": "Directory to save model checkpoints and logs."})
-    logging_file: str = field(default="training.log", metadata={"help": "File to save training logs."})
-    # logging and evaluation
-    eval_steps: int = field(default=None, metadata={"help": "Number of steps between evaluation and save runs."})
-    logging_steps: int = field(default=100, metadata={"help": "Number of steps between logging."})
-    load_best_model_at_end: bool = field(default=True, metadata={"help": "Load the best model at the end of training."})
-    # training batches and steps
-    num_epochs: int = field(default=1, metadata={"help": "Number of epochs to train for."})
-    per_device_train_batch_size: int = field(default=8, metadata={"help": "Batch size per GPU."})
-    per_device_eval_batch_size: int = field(default=8, metadata={"help": "Batch size per GPU for evaluation."})
-    gradient_accumulation_steps: int = field(default=1, metadata={"help": "Number of steps to accumulate gradients over."})
-    dataloader_num_workers: int = field(default=0, metadata={"help": "Number of workers for dataloader."})
-    mixed_precision: str = field(default="no", metadata={"help": "Mixed precision training."})
-    # optimizer
-    learning_rate: float = field(default=5e-5, metadata={"help": "Learning rate for optimizer (Adam)."})
-    weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for optimizer."})
-    gradient_clipping: float = field(default=1.0, metadata={"help": "Gradient clipping value."})
-    frac_noise_loss: float = field(default=0.5, metadata={"help": "Fraction of total loss allocated to denoising, the remainder given to demasking."})
-    # scheduler
-    warmup_steps: int = field(default=0, metadata={"help": "Number of steps for linear warmup."})
-    # early stopping
-    use_early_stopping: bool = field(default=False, metadata={"help": "Use early stopping."})
-    early_stopping_patience: int = field(default=3, metadata={"help": "Number of evaluations without improvement before stopping."})
-    early_stopping_improvement_fraction: float = field(default=0.0, metadata={"help": "Fraction of improvement needed to continue training."})
-    
 @dataclass
-class TrainerState:
-    """State of the trainer."""
-    global_step: int
-    epoch: int
-    early_stopping_patience_counter: int
-    metric: float=None
-    best_metric: float=field(default=float('inf'))
+class EarlyStoppingState:
+    """Tracks early stopping state."""
+    counter: int = 0
+    best_metric: float = float('inf')
+    
+    def state_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+        
+    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        self.counter = state_dict['counter']
+        self.best_metric = state_dict['best_metric']
 
-    def save(self, output_dir: str):
-        """Save the state to a file."""
-        with open(os.path.join(output_dir, "trainer_state.json"), "w") as f:
-            json.dump(asdict(self), f)
+    def step(self, metric: float, min_improvement: float) -> bool:
+        """Returns True if should stop."""
+        improvement = (self.best_metric - metric) / self.best_metric
+        if improvement > min_improvement:
+            self.counter = 0
+            self.best_metric = metric
+            return False
+        self.counter += 1
+        return True
 
-    @classmethod
-    def load(cls, output_dir: str):
-        """Load the state from a file."""
-        with open(os.path.join(output_dir, "trainer_state.json"), "r") as f:
-            state_dict = json.load(f)
-        return cls(**state_dict)
+@dataclass
+class MetalSiteTrainingArgs:
+    """Arguments for training."""
+    output_dir: str = field(default="./training_output")
+    logging_dir: str = field(default="./logs")
+    
+    # Training loop
+    num_epochs: int = field(default=1)
+    per_device_train_batch_size: int = field(default=8) 
+    per_device_eval_batch_size: int = field(default=8)
+    gradient_accumulation_steps: int = field(default=1)
+    dataloader_num_workers: int = field(default=0)
+    
+    # Optimizer
+    learning_rate: float = field(default=5e-5)
+    weight_decay: float = field(default=0.0)
+    gradient_clipping: float = field(default=1.0)
+    warmup_steps: int = field(default=0)
+    frac_noise_loss: float = field(default=0.5)
+    
+    # Logging and checkpoints
+    eval_steps: int = field(default=None)
+    logging_steps: int = field(default=100) 
+    load_best_model_at_end: bool = field(default=True)
+    
+    # Early stopping
+    use_early_stopping: bool = field(default=False)
+    early_stopping_patience: int = field(default=3)
+    early_stopping_improvement_fraction: float = field(default=0.0)
 
+    def __str__(self):
+        return str(asdict(self))
 
 class MetalSiteTrainer:
-    """Trainer for MetalSiteNN models that handles distributed training via Accelerate.
+    """Trainer for metal site models with distributed training support.
     
-    Coordinates:
-    - Model training and evaluation loops
-    - Distributed training across GPUs/machines 
-    - Checkpointing and model saving
-    - Metric logging and early stopping
-    - Learning rate scheduling
+    Args
+    ----
+    model: nn.Module
+        Model to train
+    compute_loss_fn: Callable
+        Function to compute loss. Signiture should be:
+            compute_loss_fn(trainer: MetalSiteTrainer, input_batch: Dict[str, torch.Tensor], return_outputs: bool = False) -> Dict[str, torch.Tensor]
+            Must return dict like with at least a 'loss' key.
+            During evaluation, this is called with return_outputs=True to return model outputs for metrics.
+    args: MetalSiteTrainingArgs
+        Training arguments
+    train_dataset: Dataset
+        Training dataset
+    eval_dataset: Dataset
+        Evaluation dataset
+    data_collator: Callable
+        Data collator
+    eval_metrics: Optional[Dict[str, Callable]]
+        Metrics to compute during evaluation. This is a dict of callable, each with signature: f(outputs) where outputs are the 
+        returns of compute_loss_fn. If None, only loss is computed
+    hard_eval_metrics: Optional[Dict[str, Callable]]
+        Metrics that require additional computation and are not directly returned by compute_loss_fn. These are called seperately with trainer as the only argument.
+        Up to you to loop through whatever dataset to compute it.
     """
-
+    
     def __init__(
         self,
         model,
@@ -127,292 +218,219 @@ class MetalSiteTrainer:
         train_dataset=None,
         eval_dataset=None,
         data_collator=None,
-        additional_eval_metrics: Optional[Dict[str, Callable]] = None
+        eval_metrics: Optional[Dict[str, Callable]]=None,
+        hard_eval_metrics: Optional[Dict[str, Callable]]=None
     ):
-        """Initialize trainer instance.
-        
-        Args:
-            model: Model to train
-            args: Training arguments defining hyperparameters and settings
-            train_dataset: Training dataset
-            eval_dataset: Optional evaluation dataset 
-            data_collator: Optional custom batch collation function
-        """
         self.args = args
         self.model = model
         self.train_dataset = train_dataset
         self.eval_dataset = eval_dataset
         self.data_collator = data_collator
         self.compute_loss_fn = compute_loss_fn
+        self.eval_metrics = eval_metrics or {}
         
-        # Initialize accelerator for distributed training
+        # Initialize early stopping
+        self.early_stopping = EarlyStoppingState() if args.use_early_stopping else None
+        
+        # Initialize accelerator
         self.accelerator = Accelerator(
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             log_with="dvclive",
-            project_dir=args.output_dir,
-            mixed_precision=args.mixed_precision
+            project_dir=args.output_dir
         )
-        self.accelerator.init_trackers("metalsitenn")
-
-        # Set up logging
-        logging.basicConfig(
-            format="TRAINER %(asctime)s - %(levelname)s - %(name)s - %(message)s",  
-            level=logging.INFO,
-            handlers=[logging.FileHandler(args.logging_file)]
-        )
-        self.logger = logging.getLogger(__name__)
+        logger.info(f"Accelerator params: {self.accelerator.__dict__}")
+        self.accelerator.init_trackers(project_name="training", init_kwargs={
+            "dvclive": {
+                "dir": os.path.join(args.output_dir, "dvclive"),
+                "report": 'md',
+                "save_dvc_exp": False
+            }
+        })
+        
+        if self.early_stopping:
+            self.accelerator.register_for_checkpointing(self.early_stopping)
 
         # Create dataloaders
-        self.train_dataloader = self._get_train_dataloader() if train_dataset is not None else None
-        self.eval_dataloader = self._get_eval_dataloader() if eval_dataset is not None else None
+        self.train_dataloader = self._get_train_dataloader() if train_dataset else None
+        self.eval_dataloader = self._get_eval_dataloader() if eval_dataset else None
 
-        # Set up optimizer and scheduler 
-        self.optimizer, self.lr_scheduler = self.create_optimizer_and_scheduler()
+        # Set up optimizer and scheduler   
+        self.optimizer = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=args.learning_rate,
+            weight_decay=args.weight_decay
+        )
 
-        # Prepare with accelerator
+        # Prepare everything with accelerator
         prepared = self.accelerator.prepare(
             self.model,
             self.optimizer, 
             self.train_dataloader,
-            self.eval_dataloader,
-            self.lr_scheduler
+            self.eval_dataloader
         )
-        self.model = prepared[0]
-        self.optimizer = prepared[1] 
-        self.train_dataloader = prepared[2]
-        self.eval_dataloader = prepared[3]
-        self.lr_scheduler = prepared[4]
+        self.model, self.optimizer, self.train_dataloader, self.eval_dataloader = prepared
 
-        self.state = TrainerState(
-            global_step=0,
-            epoch=0,
-            metric=None,
-            best_metric=float('inf'),
-            early_stopping_patience_counter=0
-        )
-
-        self.additional_eval_metrics = additional_eval_metrics
+        # hard eval metrics
+        self.hard_eval_metrics = hard_eval_metrics or {}
 
     def _get_train_dataloader(self) -> DataLoader:
-        """Create the training dataloader.
-        
-        Returns:
-            DataLoader for training dataset with appropriate batch size and collation
-        """         
-        dl = DataLoader(
+        """Create training dataloader."""
+        return DataLoader(
             self.train_dataset,
             batch_size=self.args.per_device_train_batch_size,
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers,
             shuffle=True
         )
-        logger.info(f"Created training dataloader with {len(dl)} batches.")
-        return dl
-
 
     def _get_eval_dataloader(self) -> DataLoader:
-        """Create the evaluation dataloader.
-        
-        Returns:
-            DataLoader for evaluation dataset with appropriate batch size and collation
-        """
-        dl = DataLoader(
+        """Create evaluation dataloader."""
+        return DataLoader(
             self.eval_dataset,
             batch_size=self.args.per_device_eval_batch_size,
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers
         )
-        logger.info(f"Created evaluation dataloader with {len(dl)} batches.")
-        return dl
 
-    def create_optimizer_and_scheduler(self):
-        """Create optimizer and learning rate scheduler.
+    def evaluate(self) -> float:
+        """Run evaluation and compute metrics over full dataset."""
+        self.model.eval()
+        total_loss = 0
+        num_batches = 0
         
-        Returns:
-            tuple: (optimizer, scheduler)
-        """
-        # Create optimizer
-        optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.args.learning_rate,
-            weight_decay=self.args.weight_decay
-        )
+        # Initialize metric totals
+        metric_totals = {
+            name: 0.0 for name in self.eval_metrics.keys()
+        }
         
-        # Calculate key training quantities
-        samples_per_step = (
-            self.args.per_device_train_batch_size * 
-            self.accelerator.num_processes * 
-            self.args.gradient_accumulation_steps
-        )
-        steps_per_epoch = len(self.train_dataset) // samples_per_step
-        total_training_steps = steps_per_epoch * self.args.num_epochs
-        
-        # Store for training loop
-        self.num_training_steps = total_training_steps
-        
-        # Create scheduler with warmup
-        scheduler = get_linear_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=self.args.warmup_steps,
-            num_training_steps=total_training_steps
-        )
-
-        # Log all quantities
-        logger.info(
-            f"\nTraining setup:"
-            f"\n- Total dataset size: {len(self.train_dataset)}"
-            f"\n- Number of devices: {self.accelerator.num_processes}"
-            f"\n- Per device batch size: {self.args.per_device_train_batch_size}"
-            f"\n- Gradient accumulation steps: {self.args.gradient_accumulation_steps}"
-            f"\n- Effective batch size per step: {samples_per_step}"
-            f"\n- Steps per epoch: {steps_per_epoch}"
-            f"\n- Number of epochs: {self.args.num_epochs}"
-            f"\n- Total training steps: {total_training_steps}"
-            f"\n- Warmup steps: {self.args.warmup_steps}"
-        )
-        
-        return optimizer, scheduler
-    
-    def compute_loss(self, input_batch: Dict[str, torch.Tensor], return_outputs: bool = False) -> Dict[str, torch.Tensor]:
-        """Compute the loss for a training step.
-        
-        Args:
-            input_batch: Dictionary of input data
-            return_outputs: Whether to return model outputs
-        
-        Returns:
-            Dictionary of losses and optionally model outputs
-        """
-        return self.compute_loss_fn(self, input_batch, return_outputs)
-    
-    def evaluate(self, metric_funcs=None):
-        # Use accelerator.log() instead of tracker directly
-        losses = []
         for batch in self.eval_dataloader:
             with torch.no_grad():
-                outputs = self.compute_loss(batch, return_outputs=True) 
+                outputs = self.compute_loss_fn(self, batch, return_outputs=True)
                 loss = outputs["loss"]
-                losses.append(loss.detach())
-
-            if metric_funcs:
-                gathered_outputs = self.accelerator.gather_for_metrics(outputs)
-                for name, func in metric_funcs.items():
-                    try:
+                total_loss += loss.detach().float()
+                
+                # Compute batch metrics
+                if self.eval_metrics:
+                    gathered_outputs = self.accelerator.gather_for_metrics(outputs)
+                    for name, func in self.eval_metrics.items():
                         metric_val = func(gathered_outputs)
-                        self.accelerator.log({f"eval/{name}": metric_val})
-                    except Exception as e:
-                        self.logger.warning(f"Failed to compute {name}: {e}")
+                        metric_totals[name] += metric_val
+                        
+            num_batches += 1
 
-        losses = torch.stack(losses)
-        avg_loss = self.accelerator.gather_for_metrics(losses).mean().item()
-        self.accelerator.log({"eval/loss": avg_loss})
-        return avg_loss
+        # Average metrics across all batches
+        avg_loss = total_loss / num_batches
+        
+        # Log all metrics at once
+        metrics = {"eval/loss": avg_loss.item()}
+        if self.eval_metrics:
+            metrics.update({
+                f"eval/{name}": total / num_batches 
+                for name, total in metric_totals.items()
+            })
+        self.accelerator.log(metrics)
+
+        # now do any hard metrics
+        for name, func in self.hard_eval_metrics.items():
+            func(self)
+        
+        return avg_loss.item()
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
-        """Train the model with multi-GPU support via Accelerate."""
-
-        # Calculate true number of total steps accounting for all devices
-        num_update_steps_per_epoch = (
-            len(self.train_dataloader) // self.args.gradient_accumulation_steps
-        ) 
-        num_total_steps = num_update_steps_per_epoch * self.args.num_epochs
-
-        # Resume from checkpoint if specified
+        """Run training."""
+        # Resume if needed
         if resume_from_checkpoint:
-            self._load_checkpoint(resume_from_checkpoint)
-            self.logger.info(f"Resumed from checkpoint: {resume_from_checkpoint}")
+            self.accelerator.load_state(resume_from_checkpoint)
+            logger.info(f"Resumed from checkpoint: {resume_from_checkpoint}")
 
-        self.logger.info(
-            f"Training setup:\n"
-            f"- Total steps: {num_total_steps}\n"
-            f"- Steps per epoch: {num_update_steps_per_epoch}\n" 
-            f"- Gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
-            f"- Number of devices: {self.accelerator.num_processes}\n"
-            f"- Effective batch size: {self.args.per_device_train_batch_size * self.accelerator.num_processes * self.args.gradient_accumulation_steps}\n"
-            f"- Num trainable params: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}\n"
+        logger.info(
+            f"Training with {self.accelerator.num_processes} processes on {self.accelerator.device.type}\n"
+            f" - output_dir: {self.args.output_dir}\n"
+            f" - examples in dataset: {len(self.train_dataset)}\n"
+            f" - per device batch size: {self.args.per_device_train_batch_size}\n"
+            f" - gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
+
+            f" - effective batch size: {self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.accelerator.num_processes}\n"
+            f" - total epochs: {self.args.num_epochs}\n"
+            f" - steps per epoch: {len(self.train_dataloader)}\n"
+            f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
+            f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
+            f" - warmup steps: {self.args.warmup_steps}\n"
+            f" - log training loss every {self.args.logging_steps} steps\n"
+            f" - eval and checkpoint every {self.args.eval_steps} steps\n"
+            f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
         )
 
         # Training loop
-        for epoch in range(self.state.epoch, self.args.num_epochs):
+        for epoch in range(self.args.num_epochs):
             self.model.train()
             total_loss = 0
             
-            progress_bar = enumerate(self.train_dataloader)
-            if self.accelerator.is_main_process:
-                progress_bar = tqdm(progress_bar, total=len(self.train_dataloader))
+            progress_bar = tqdm(
+                self.train_dataloader,
+                disable=not self.accelerator.is_local_main_process
+            )
 
-            for step, batch in progress_bar:
+            for step, batch in enumerate(progress_bar):
                 with self.accelerator.accumulate(self.model):
-                    outputs = self.compute_loss(batch)
+                    outputs = self.compute_loss_fn(self, batch)
                     loss = outputs["loss"]
                     
                     self.accelerator.backward(loss)
                     
-                    if not self.accelerator.sync_gradients:
-                        continue
-                    else:
-                        self.accelerator.clip_grad_norm_(self.model.parameters(), self.args.gradient_clipping)
-                        
-                    self.optimizer.step()
-                    self.lr_scheduler.step()
-                    self.optimizer.zero_grad()
-                    self.state.global_step += 1
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(
+                            self.model.parameters(),
+                            self.args.gradient_clipping
+                        )
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
 
-                    # Logging (only on main process)
-                    if self.accelerator.is_main_process:
-                        if self.state.global_step % self.args.logging_steps == 0:
-                            total_loss = self.accelerator.gather(total_loss).mean()
-                            avg_loss = total_loss / self.args.logging_steps
-                            self.logger.info(
-                                f"Epoch: {epoch}, Step: {self.state.global_step}, "
-                                f"Loss: {avg_loss:.4f}, LR: {self.lr_scheduler.get_last_lr()[0]:.2e}"
-                            )
-                            total_loss = 0
+                    total_loss += loss.detach().float()
 
-                        # Evaluate and save if needed 
-                        if self.args.eval_steps and self.state.global_step % self.args.eval_steps == 0:
-                            eval_loss = self.evaluate(self.additional_eval_metrics)
-                            self.model.train()
+                # Log training metrics
+                if step > 0 and step % self.args.logging_steps == 0:
+                    avg_loss = total_loss / self.args.logging_steps
+                    self.accelerator.log({
+                        "train/loss": avg_loss.item(),
+                        "train/epoch": epoch,
+                        "train/step": step,
+                        "train/learning_rate": self.optimizer.param_groups[0]["lr"]
+                    })
+                    total_loss = 0
 
-                            if eval_loss < self.state.best_metric:
-                                self.state.best_metric = eval_loss
-                                self._checkpoint(os.path.join(self.args.output_dir, "best"))
-                            
-                            if self.args.use_early_stopping:
-                                self._check_early_stopping(eval_loss)
-                                if self.state.early_stopping_patience_counter >= self.args.early_stopping_patience:
-                                    self.logger.info("Early stopping triggered")
-                                    return
+                # Evaluate and checkpoint if needed
+                if (
+                    self.args.eval_steps 
+                    and step > 0 
+                    and step % self.args.eval_steps == 0
+                ):
+                    eval_loss = self.evaluate()
+                    self.model.train()
 
-            self.state.epoch += 1
-            
-            # Save epoch checkpoint on main process
-            if self.accelerator.is_main_process:
-                self._checkpoint(os.path.join(self.args.output_dir, f"epoch_{epoch}"))
+                    # Save checkpoint
+                    output_dir = os.path.join(
+                        self.args.output_dir,
+                        f"step_{step}"
+                    )
+                    self.accelerator.save_state(output_dir)
 
-        # Load best model if requested
-        if self.args.load_best_model_at_end and self.accelerator.is_main_process:
-            self._load_checkpoint(os.path.join(self.args.output_dir, "best"))
+                    if self.early_stopping:
+                        should_stop = self.early_stopping.step(
+                            eval_loss,
+                            self.args.early_stopping_improvement_fraction
+                        )
+                        if (should_stop and 
+                            self.early_stopping.counter >= self.args.early_stopping_patience):
+                            logger.info("Early stopping triggered")
+                            return
 
-    def _check_early_stopping(self, eval_loss: float):
-        """Check if early stopping criteria are met."""
-        improvement = (self.best_metric - eval_loss) / self.best_metric
-        if improvement < self.args.early_stopping_improvement_fraction:
-            self.early_stopping_patience_counter += 1
-        else:
-            self.early_stopping_patience_counter = 0
+        # End of training
 
-    def _checkpoint(self, location: str):
-        """Save a checkpoint."""
-        self.accelerator.save_state(os.path.join(location, "acc_checkpoint"))
-        self.state.save(location)
+        output_dir = os.path.join(
+            self.args.output_dir,
+            f"step_{step}"
+        )
+        self.accelerator.save_state(output_dir)
 
-    def _load_checkpoint(self, location: str):
-        """Load a checkpoint."""
-        os.makedirs(location, exist_ok=True)
-        self.accelerator.load_state(os.path.join(location, "acc_checkpoint"))
-        self.state = TrainerState.load(location)
-
-    
-
-        
+        self.accelerator.end_training()
