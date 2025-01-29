@@ -155,21 +155,21 @@ stages:
         training.warmup_steps: 100
         training.weight_decay: 0.001
     outs:
-    - path: data/model_pretraining
-      hash: md5
-      md5: ed0bb8d452581d5196221ee40607cb84.dir
-      size: 5090890
-      nfiles: 46
     - path: data/model_pretraining/dvclive/metrics.json
       hash: md5
-      md5: b8ab7ff8808cb032ab85a13d6e0a1c1b
-      size: 337
+      md5: 236280120fd133727870d8d856fcbeb3
+      size: 334
     - path: data/model_pretraining/dvclive/plots/custom/eval_2d_space.json
       hash: md5
-      md5: 9768372bc61a704dc3b281f7ace2bf2c
-      size: 155936
+      md5: 18cb635cc82164faf327e2399c161b61
+      size: 155972
     - path: data/model_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: fdaac137f1839e27e4ef3ff956eda8ed.dir
-      size: 1371
+      md5: 4df9b69f9107b2d0b7c3281ef09572f6.dir
+      size: 1366
       nfiles: 8
+    - path: data/model_pretraining/final_model
+      hash: md5
+      md5: 88f9d9b6a40967d69b71dcd4abf464bd.dir
+      size: 286383
+      nfiles: 2

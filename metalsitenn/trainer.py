@@ -243,7 +243,8 @@ class MetalSiteTrainer:
             "dvclive": {
                 "dir": os.path.join(args.output_dir, "dvclive"),
                 "report": 'md',
-                "save_dvc_exp": False
+                "save_dvc_exp": False,
+                "dvcyaml": None
             }
         })
         

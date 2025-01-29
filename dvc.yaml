@@ -82,7 +82,7 @@ stages:
     - embedding.tsne_learning_rate
     - embedding.tsne_n_iter
     outs:
-    - data/model_pretraining
+    - data/model_pretraining/final_model
     metrics:
     - data/model_pretraining/dvclive/metrics.json
     plots:
@@ -92,3 +92,4 @@ stages:
         template: scatter
         x: x
         y: y
+
