@@ -92,13 +92,3 @@ stages:
         template: scatter
         x: x
         y: y
-
-metrics:
-- data/model_pretraining/dvclive/metrics.json
-plots:
-- data/model_pretraining/dvclive/plots/metrics:
-    x: step
-- data/model_pretraining/dvclive/plots/custom/eval_2d_space.json:
-    template: scatter
-    x: x
-    y: y
