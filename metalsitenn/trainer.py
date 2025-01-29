@@ -14,8 +14,8 @@ import logging
 from typing import Optional, Dict, Any, Callable
 
 import torch 
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
-from transformers import get_scheduler
 from accelerate import Accelerator
 from tqdm import tqdm
 
@@ -101,7 +101,7 @@ def NO_MASKING_EMBED_AND_CLUSTER(
         # get the sillhouette score and log it
         from sklearn.metrics import silhouette_score
         score = silhouette_score(embeddings_all, clusterer.labels_)
-        trainer.accelerator.log({"eval/silhouette_score": score})
+        trainer.accelerator.log({"eval/silhouette_score": score}, step=trainer.global_step)
 
         # lower dimensions using tsne
         from sklearn.manifold import TSNE
@@ -118,6 +118,11 @@ def NO_MASKING_EMBED_AND_CLUSTER(
             y='y',
             template='scatter'
         )
+
+        # dvc saves over the same file each run, so if we want a trajectory of these plots we need to save manually
+        if not os.path.exists(os.path.join(trainer.args.output_dir, "eval_2d_space")):
+            os.makedirs(os.path.join(trainer.args.output_dir, "eval_2d_space"))
+        datapoints_df.to_csv(os.path.join(trainer.args.output_dir, "eval_2d_space", f"step_{trainer.global_step}.csv"))
     return
 
 """Metrics used during evaluation that can be computed directly from model loss outputs."""
@@ -131,6 +136,7 @@ class EarlyStoppingState:
     """Tracks early stopping state."""
     counter: int = 0
     best_metric: float = float('inf')
+    best_step: int = 0
     
     def state_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -138,15 +144,19 @@ class EarlyStoppingState:
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         self.counter = state_dict['counter']
         self.best_metric = state_dict['best_metric']
+        self.best_step = state_dict['best_step']
 
-    def step(self, metric: float, min_improvement: float) -> bool:
+    def step(self, metric: float, current_step: int, min_improvement: float) -> bool:
         """Returns True if should stop."""
         improvement = (self.best_metric - metric) / self.best_metric
+        if metric < self.best_metric:
+            self.best_metric = metric
+            self.best_step = current_step
         if improvement > min_improvement:
             self.counter = 0
-            self.best_metric = metric
             return False
         self.counter += 1
+        logger.info(f"Early stopping counter triggered: {self.counter}, best metric: {self.best_metric}, current metric: {metric}, improvement: {improvement}, min improvement: {min_improvement}")
         return True
 
 @dataclass
@@ -166,7 +176,7 @@ class MetalSiteTrainingArgs:
     learning_rate: float = field(default=5e-5)
     weight_decay: float = field(default=0.0)
     gradient_clipping: float = field(default=1.0)
-    warmup_steps: int = field(default=0)
+    warmup_pct: float = field(default=0.1)
     frac_noise_loss: float = field(default=0.5)
     
     # Logging and checkpoints
@@ -258,8 +268,15 @@ class MetalSiteTrainer:
         # Set up optimizer and scheduler   
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=args.learning_rate,
+            lr=args.learning_rate if args.warmup_pct == 0 else args.learning_rate / 25,
             weight_decay=args.weight_decay
+        )
+        self.scheduler = OneCycleLR(
+            self.optimizer,
+            max_lr=args.learning_rate,
+            epochs=args.num_epochs,
+            steps_per_epoch=len(self.train_dataloader),
+            pct_start=args.warmup_pct
         )
 
         # Prepare everything with accelerator
@@ -267,12 +284,17 @@ class MetalSiteTrainer:
             self.model,
             self.optimizer, 
             self.train_dataloader,
-            self.eval_dataloader
+            self.eval_dataloader,
+            self.scheduler
         )
-        self.model, self.optimizer, self.train_dataloader, self.eval_dataloader = prepared
+        self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.scheduler = prepared
 
         # hard eval metrics
         self.hard_eval_metrics = hard_eval_metrics or {}
+
+        # create checkpointomg folder if not present
+        if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
+            os.makedirs(os.path.join(args.output_dir, "checkpoints"))
 
     def _get_train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
@@ -292,6 +314,24 @@ class MetalSiteTrainer:
             collate_fn=self.data_collator,
             num_workers=self.args.dataloader_num_workers
         )
+    
+    def save_checkpoint(self, output_dir: str):
+        """Save model checkpoint with dynamic parameter handling"""
+        # Initialize dynamic params before saving
+        dummy_batch = next(iter(self.train_dataloader))
+        with torch.no_grad():
+            self.model(**dummy_batch)
+        
+        self.accelerator.save_state(output_dir)
+
+    def load_checkpoint(self, checkpoint_dir: str):
+        """Load checkpoint with dynamic parameter handling"""
+        # Initialize dynamic params before loading
+        dummy_batch = next(iter(self.train_dataloader))
+        with torch.no_grad():
+            self.model(**dummy_batch)
+            
+        self.accelerator.load_state(checkpoint_dir)
 
     def evaluate(self) -> float:
         """Run evaluation and compute metrics over full dataset."""
@@ -329,7 +369,7 @@ class MetalSiteTrainer:
                 f"eval/{name}": total / num_batches 
                 for name, total in metric_totals.items()
             })
-        self.accelerator.log(metrics)
+        self.accelerator.log(metrics, step=self.global_step)
 
         # now do any hard metrics
         for name, func in self.hard_eval_metrics.items():
@@ -338,9 +378,11 @@ class MetalSiteTrainer:
         return avg_loss.item()
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
-        """Run training."""
-        # Resume if needed
+        # Add global step tracking
+        self.global_step = 0
         if resume_from_checkpoint:
+            # Assuming checkpoint contains global step
+            self.global_step = int(resume_from_checkpoint.split('_')[-1])
             self.accelerator.load_state(resume_from_checkpoint)
             logger.info(f"Resumed from checkpoint: {resume_from_checkpoint}")
 
@@ -356,7 +398,7 @@ class MetalSiteTrainer:
             f" - steps per epoch: {len(self.train_dataloader)}\n"
             f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
             f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
-            f" - warmup steps: {self.args.warmup_steps}\n"
+            f" - warmup steps: {self.args.warmup_pct * self.args.num_epochs * len(self.train_dataloader)}\n"
             f" - log training loss every {self.args.logging_steps} steps\n"
             f" - eval and checkpoint every {self.args.eval_steps} steps\n"
             f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
@@ -372,7 +414,7 @@ class MetalSiteTrainer:
                 disable=not self.accelerator.is_local_main_process
             )
 
-            for step, batch in enumerate(progress_bar):
+            for batch in progress_bar:
                 with self.accelerator.accumulate(self.model):
                     outputs = self.compute_loss_fn(self, batch)
                     loss = outputs["loss"]
@@ -386,25 +428,29 @@ class MetalSiteTrainer:
                         )
                         self.optimizer.step()
                         self.optimizer.zero_grad()
+                        self.scheduler.step()
 
                     total_loss += loss.detach().float()
 
+                # Increment global step
+                self.global_step += 1
+
                 # Log training metrics
-                if step > 0 and step % self.args.logging_steps == 0:
+                if self.global_step > 0 and self.global_step % self.args.logging_steps == 0:
                     avg_loss = total_loss / self.args.logging_steps
                     self.accelerator.log({
                         "train/loss": avg_loss.item(),
                         "train/epoch": epoch,
-                        "train/step": step,
+                        "train/global_step": self.global_step,
                         "train/learning_rate": self.optimizer.param_groups[0]["lr"]
-                    })
+                    }, step=self.global_step)
                     total_loss = 0
 
                 # Evaluate and checkpoint if needed
                 if (
                     self.args.eval_steps 
-                    and step > 0 
-                    and step % self.args.eval_steps == 0
+                    and self.global_step > 0 
+                    and self.global_step % self.args.eval_steps == 0
                 ):
                     eval_loss = self.evaluate()
                     self.model.train()
@@ -412,26 +458,41 @@ class MetalSiteTrainer:
                     # Save checkpoint
                     output_dir = os.path.join(
                         self.args.output_dir,
-                        f"step_{step}"
+                        "checkpoints",
+                        f"step_{self.global_step}"
                     )
-                    self.accelerator.save_state(output_dir)
+                    self.save_checkpoint(output_dir)
 
                     if self.early_stopping:
                         should_stop = self.early_stopping.step(
                             eval_loss,
+                            self.global_step,
                             self.args.early_stopping_improvement_fraction
                         )
                         if (should_stop and 
                             self.early_stopping.counter >= self.args.early_stopping_patience):
                             logger.info("Early stopping triggered")
+                            self._finish_up()
                             return
+                        
+        # Finish up
+        self._finish_up()
 
-        # End of training
 
+
+    def _finish_up(self):
         output_dir = os.path.join(
             self.args.output_dir,
-            f"step_{step}"
+            "checkpoints",
+            f"step_{self.global_step}"
         )
-        self.accelerator.save_state(output_dir)
+        self.save_checkpoint(output_dir)
 
-        self.accelerator.end_training()
+        if self.args.load_best_model_at_end and self.early_stopping:
+            best_model_path = os.path.join(
+                self.args.output_dir,
+                "checkpoints",
+                f"step_{self.early_stopping.best_step}"
+            )
+            logger.info(f"Loading best model from step {self.early_stopping.best_step}")
+            self.load_checkpoint(best_model_path)

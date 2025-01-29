@@ -108,8 +108,8 @@ stages:
       size: 40
     - path: pipeline/2.1_self_supervised_training.py
       hash: md5
-      md5: 9f333f5c506b98e76a6a47bf13129c87
-      size: 6604
+      md5: f9abce41a5c333d4523499acba67a280
+      size: 6600
     params:
       params.yaml:
         embedding.hdbscan_alpha: 1.0
@@ -136,10 +136,10 @@ stages:
         model.num_layers: 2
         model.proj_drop: 0.0
         training.dataloader_num_workers: 1
-        training.debug_sample: 2000
+        training.debug_sample: 500
         training.early_stopping_improvement_fraction: 0.01
         training.early_stopping_patience: 10
-        training.eval_steps: 100
+        training.eval_steps: 20
         training.frac_noise_loss: 0.5
         training.gradient_accumulation_steps: 2
         training.gradient_clipping: 1.0
@@ -152,24 +152,34 @@ stages:
         training.num_epochs: 1
         training.per_device_batch_size: 4
         training.use_early_stopping: true
-        training.warmup_steps: 100
+        training.warmup_pct: 0.1
         training.weight_decay: 0.001
     outs:
+    - path: data/model_pretraining/checkpoints
+      hash: md5
+      md5: 128988c7f57de8d3cc1f97c8d30765ed.dir
+      size: 6280862
+      nfiles: 42
     - path: data/model_pretraining/dvclive/metrics.json
       hash: md5
-      md5: 236280120fd133727870d8d856fcbeb3
-      size: 334
+      md5: 07af2a751b6057f67e65066ea43b1ba7
+      size: 358
     - path: data/model_pretraining/dvclive/plots/custom/eval_2d_space.json
       hash: md5
-      md5: 18cb635cc82164faf327e2399c161b61
-      size: 155972
+      md5: c6005b010edbae02bda27d2531bb6dac
+      size: 38959
     - path: data/model_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: 4df9b69f9107b2d0b7c3281ef09572f6.dir
-      size: 1366
+      md5: d83a4a6c6dff24ebcb308ed5f06c92e2.dir
+      size: 960
       nfiles: 8
+    - path: data/model_pretraining/eval_2d_space
+      hash: md5
+      md5: 6427a6ce1e417f42c3ade595375b89fe.dir
+      size: 72621
+      nfiles: 6
     - path: data/model_pretraining/final_model
       hash: md5
-      md5: 88f9d9b6a40967d69b71dcd4abf464bd.dir
+      md5: e2b03c8de79b4a30d9f5742d75011270.dir
       size: 286383
       nfiles: 2

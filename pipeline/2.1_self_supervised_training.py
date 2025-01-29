@@ -135,7 +135,7 @@ def main():
         gradient_clipping=params.training.gradient_clipping,
         frac_noise_loss=params.training.frac_noise_loss,
 
-        warmup_steps=params.training.warmup_steps,
+        warmup_pct=params.training.warmup_pct,
         use_early_stopping=params.training.use_early_stopping,
         early_stopping_patience=params.training.early_stopping_patience,
         early_stopping_improvement_fraction=params.training.early_stopping_improvement_fraction

@@ -271,6 +271,45 @@ class MetalSiteFoundationalModel(MetalSitePretrainedModel):
             output_hidden_states=config.output_hidden_states,
         )
 
+    def state_dict(self, *args, destination=None, prefix='', keep_vars=False):
+        """Override state_dict to handle dynamic parameters"""
+        # Initialize dynamic params 
+        dummy_batch = self._create_dummy_batch()
+        for key in dummy_batch:
+            if isinstance(dummy_batch[key], torch.Tensor):
+                dummy_batch[key] = dummy_batch[key].to(self.device)
+        with torch.no_grad():
+            self(**dummy_batch)
+            
+        # Get state dict with proper args
+        if destination is None:
+            destination = {}
+        return super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+
+    def _create_dummy_batch(self):
+        """Create minimal batch to initialize dynamic parameters
+        
+        Creates a simple 2-node, 1-edge system to allow initialization 
+        of all network components including attention
+        """
+        batch_size = 1
+        num_nodes = 2
+        num_edges = 1
+        
+        return {
+            'atoms': torch.zeros(num_nodes, dtype=torch.long),
+            'atom_types': torch.zeros(num_nodes, dtype=torch.long), 
+            'pos': torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            'batch_idx': torch.zeros(num_nodes, dtype=torch.long),
+            'edge_src': torch.tensor([0]),
+            'edge_dst': torch.tensor([1]),
+            'mask': torch.zeros(num_nodes, dtype=torch.bool),
+            'atom_labels': torch.zeros(num_nodes, dtype=torch.long),
+            'atom_type_labels': torch.zeros(num_nodes, dtype=torch.long),
+            'noise_mask': torch.zeros(num_nodes, dtype=torch.bool),
+            'denoise_vectors': torch.zeros(num_nodes, 3)
+        }
+
     def forward(
         self,
         atoms: torch.Tensor,
@@ -402,7 +441,46 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             atom_type_vocab_size=config.atom_type_vocab_size,
         )
         self.cel = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor,
-                                       reduction='none') 
+                                       reduction='none')
+        
+    def state_dict(self, *args, destination=None, prefix='', keep_vars=False):
+        """Override state_dict to handle dynamic parameters"""
+        # Initialize dynamic params 
+        dummy_batch = self._create_dummy_batch()
+        for key in dummy_batch:
+            if isinstance(dummy_batch[key], torch.Tensor):
+                dummy_batch[key] = dummy_batch[key].to(self.device)
+        with torch.no_grad():
+            self(**dummy_batch)
+            
+        # Get state dict with proper args
+        if destination is None:
+            destination = {}
+        return super().state_dict(destination=destination, prefix=prefix, keep_vars=keep_vars)
+
+    def _create_dummy_batch(self):
+        """Create minimal batch to initialize dynamic parameters
+        
+        Creates a simple 2-node, 1-edge system to allow initialization 
+        of all network components including attention
+        """
+        batch_size = 1
+        num_nodes = 2
+        num_edges = 1
+        
+        return {
+            'atoms': torch.zeros(num_nodes, dtype=torch.long),
+            'atom_types': torch.zeros(num_nodes, dtype=torch.long), 
+            'pos': torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            'batch_idx': torch.zeros(num_nodes, dtype=torch.long),
+            'edge_src': torch.tensor([0]),
+            'edge_dst': torch.tensor([1]),
+            'mask': torch.zeros(num_nodes, dtype=torch.bool),
+            'atom_labels': torch.zeros(num_nodes, dtype=torch.long),
+            'atom_type_labels': torch.zeros(num_nodes, dtype=torch.long),
+            'noise_mask': torch.zeros(num_nodes, dtype=torch.bool),
+            'denoise_vectors': torch.zeros(num_nodes, 3)
+        }
 
     def compute_mask_loss(self, atom_logits, atom_labels, mask_indices, batch_idx):
         """Loss normalized per system"""
