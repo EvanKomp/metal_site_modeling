@@ -18,6 +18,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
 from tqdm import tqdm
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,10 @@ def NO_MASKING_EMBED_AND_CLUSTER(
         embeddings_2d = tsne.fit_transform(embeddings_all)
         datapoints_df = pd.DataFrame(embeddings_2d, columns=['x', 'y'])
 
+        # randomly sample 2000 embeddings if more than that
+        if len(datapoints_df) > 2000:
+            datapoints_df = datapoints_df.sample(2000, random_state=42)
+
         # log a plot of the 2d space directly through dvc live
         trainer.accelerator.get_tracker('dvclive', unwrap=True).log_plot(
             "eval_2d_space",
@@ -127,8 +132,16 @@ def NO_MASKING_EMBED_AND_CLUSTER(
 
 """Metrics used during evaluation that can be computed directly from model loss outputs."""
 COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING = {
-    'mask_loss': lambda outputs: outputs['mask_loss'].item(),
-    'noise_loss': lambda outputs: outputs['noise_loss'].item()
+    'mask_loss': lambda outputs, batch: outputs['mask_loss'].item(),
+    'noise_loss': lambda outputs, batch: outputs['noise_loss'].item(),
+    'atom_mask_accuracy': lambda outputs, batch: (
+        outputs['outputs'].atom_logits[batch['mask']].argmax(dim=-1) == 
+        batch['atom_labels'][batch['mask']]
+    ).float().mean().item(),
+    'record_mask_accuracy': lambda outputs, batch: (
+        outputs['outputs'].type_logits[batch['mask']].argmax(dim=-1) == 
+        batch['atom_type_labels'][batch['mask']]
+    ).float().mean().item()
 }
 
 @dataclass
@@ -280,6 +293,7 @@ class MetalSiteTrainer:
             steps_per_epoch=len(self.train_dataloader),
             pct_start=args.warmup_pct
         )
+        self.n_warmup_steps = args.warmup_pct * args.num_epochs * len(self.train_dataloader)
 
         # Prepare everything with accelerator
         prepared = self.accelerator.prepare(
@@ -335,13 +349,40 @@ class MetalSiteTrainer:
             
         self.accelerator.load_state(checkpoint_dir)
 
+    def _cleanup_checkpoints(self):
+        """Maintain only best checkpoint and last N checkpoints where N=patience."""
+        if not self.early_stopping:
+            return
+            
+        checkpoint_dir = os.path.join(self.args.output_dir, "checkpoints")
+        checkpoints = sorted([
+            int(f.split('_')[-1]) 
+            for f in os.listdir(checkpoint_dir) 
+            if f.startswith('step_')
+        ])
+        
+        # Always keep best checkpoint
+        checkpoints_to_keep = {self.early_stopping.best_step}
+        
+        # Keep last patience number of checkpoints
+        patience_checkpoints = checkpoints[-self.args.early_stopping_patience:]
+        checkpoints_to_keep.update(patience_checkpoints)
+        
+        # Remove others
+        for step in checkpoints:
+            if step not in checkpoints_to_keep:
+                checkpoint_path = os.path.join(checkpoint_dir, f'step_{step}')
+                if os.path.exists(checkpoint_path):
+                    import shutil
+                    shutil.rmtree(checkpoint_path)
+
     def evaluate(self) -> float:
         """Run evaluation and compute metrics over full dataset."""
         self.model.eval()
         total_loss = 0
         num_batches = 0
         
-        # Initialize metric totals
+        # Initialize metric totals 
         metric_totals = {
             name: 0.0 for name in self.eval_metrics.keys()
         }
@@ -355,8 +396,9 @@ class MetalSiteTrainer:
                 # Compute batch metrics
                 if self.eval_metrics:
                     gathered_outputs = self.accelerator.gather_for_metrics(outputs)
+                    gathered_batch = self.accelerator.gather_for_metrics(batch)
                     for name, func in self.eval_metrics.items():
-                        metric_val = func(gathered_outputs)
+                        metric_val = func(gathered_outputs, gathered_batch)
                         metric_totals[name] += metric_val
                         
             num_batches += 1
@@ -400,11 +442,14 @@ class MetalSiteTrainer:
             f" - steps per epoch: {len(self.train_dataloader)}\n"
             f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
             f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
-            f" - warmup steps: {self.args.warmup_pct * self.args.num_epochs * len(self.train_dataloader)}\n"
+            f" - warmup steps: {self.n_warmup_steps}\n"
             f" - log training loss every {self.args.logging_steps} steps\n"
             f" - eval and checkpoint every {self.args.eval_steps} steps\n"
             f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
         )
+
+        # run eval before training
+        self.evaluate()
 
         # Training loop
         for epoch in range(self.args.num_epochs):
@@ -464,6 +509,7 @@ class MetalSiteTrainer:
                         f"step_{self.global_step}"
                     )
                     self.save_checkpoint(output_dir)
+                    self._cleanup_checkpoints()
 
                     if self.early_stopping:
                         should_stop = self.early_stopping.step(
@@ -473,13 +519,13 @@ class MetalSiteTrainer:
                         )
                         if (should_stop and 
                             self.early_stopping.counter >= self.args.early_stopping_patience):
-                            logger.info("Early stopping triggered")
-                            self._finish_up()
-                            return
+                            if self.global_step > self.n_warmup_steps:
+                                logger.info("Early stopping triggered")
+                                self._finish_up()
+                                return
                         
         # Finish up
         self._finish_up()
-
 
 
     def _finish_up(self):
@@ -490,7 +536,7 @@ class MetalSiteTrainer:
         )
         self.save_checkpoint(output_dir)
 
-        if self.args.load_best_model_at_end and self.early_stopping:
+        if self.args.load_best_model_at_end and self.early_stopping and self.early_stopping.best_step > 0:
             best_model_path = os.path.join(
                 self.args.output_dir,
                 "checkpoints",

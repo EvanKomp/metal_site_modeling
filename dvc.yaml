@@ -33,6 +33,18 @@ stages:
     metrics:
     - data/training_avg_num_neighbors.json
 
+  1.4_compute_null_model:
+    cmd: python pipeline/1.4_compute_null_model.py
+    deps:
+      - pipeline/1.4_compute_null_model.py
+      - data/dataset/metal_site_dataset
+    params:
+      - training.mask_rate
+      - training.noise_rate
+      - training.noise_scale
+    metrics:
+      - data/metrics/null_model_metrics.json
+
   2.1_self_supervised_training:
     cmd: accelerate launch pipeline/2.1_self_supervised_training.py
     deps:

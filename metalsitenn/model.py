@@ -14,6 +14,7 @@ from e3nn import o3
 import math
 from dataclasses import dataclass
 import numpy as np
+import os
 
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
@@ -22,7 +23,7 @@ from torch_scatter import scatter
 
 from metalsitenn.nn import MetalSiteFoundationalBackbone, MetalSiteNodeHeadLayer
 
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import logging
 logger = logging.getLogger(__name__)
@@ -676,5 +677,60 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
         self.backbone.backbone.output_hidden_states = False
         
         return embeddings
+    
+    def simulate_movement(
+        self,
+        atoms: torch.Tensor,
+        atom_types: torch.Tensor,
+        pos: torch.Tensor,
+        residue_info: List[Dict],
+        tokenizer: "AtomTokenizer",
+        output_dir: str,
+        num_steps: int = 10,
+        damping: float = 0.5,
+        batch_idx: Optional[torch.Tensor] = None
+    ) -> None:
+        """Simulate atomic movement based on model vector predictions.
+        
+        Args:
+            atoms: [num_atoms] Atom type tokens
+            atom_types: [num_atoms] Record type tokens
+            pos: [num_atoms, 3] Coordinates 
+            residue_info: List of dicts with per-atom PDB info
+            tokenizer: Tokenizer for atom/record types
+            output_dir: Directory to save PDB frames
+            num_steps: Number of simulation steps
+            damping: Factor to scale predicted movement vectors
+            batch_idx: Optional [num_atoms] batch indices, defaults to all zeros
+        """
+        from metalsitenn.io import save_metal_site
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if batch_idx is None:
+            batch_idx = torch.zeros(len(atoms), dtype=torch.long)
+            
+        curr_pos = pos.clone()
+        
+        for i in range(num_steps):
+            # Get movement vectors from model
+            outputs = self.forward(
+                atoms=atoms,
+                atom_types=atom_types,
+                pos=curr_pos,
+                batch_idx=batch_idx
+            )
+            
+            # Update positions with damping
+            curr_pos = curr_pos + outputs.output_vectors * damping
+            
+            # Save frame
+            save_metal_site(
+                atoms=atoms,
+                atom_types=atom_types,
+                pos=curr_pos,
+                residue_info=residue_info,
+                tokenizer=tokenizer,
+                output_path=os.path.join(output_dir, f"{i:03d}.pdb")
+            )
 
                 
