@@ -183,3 +183,25 @@ stages:
       md5: 10d8bc97e6c3026002840b84dccfd238.dir
       size: 286383
       nfiles: 2
+  1.4_compute_null_model:
+    cmd: python pipeline/1.4_compute_null_model.py
+    deps:
+    - path: data/dataset/metal_site_dataset
+      hash: md5
+      md5: 073db9a3f1ea26223777c3abbf416dd7.dir
+      size: 3291760765
+      nfiles: 13
+    - path: pipeline/1.4_compute_null_model.py
+      hash: md5
+      md5: 216cc29669ad327b49c7fcfa482299bd
+      size: 3569
+    params:
+      params.yaml:
+        training.mask_rate: 0.15
+        training.noise_rate: 0.15
+        training.noise_scale: 1.0
+    outs:
+    - path: data/metrics/null_model_metrics.json
+      hash: md5
+      md5: 821360c0f3273e7481a334c5f3877c99
+      size: 115
