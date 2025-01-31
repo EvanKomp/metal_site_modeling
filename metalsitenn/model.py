@@ -20,6 +20,7 @@ from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
 from transformers.configuration_utils import PretrainedConfig
 from torch_scatter import scatter
+import torch
 
 from metalsitenn.nn import MetalSiteFoundationalBackbone, MetalSiteNodeHeadLayer
 
@@ -177,14 +178,14 @@ class MetalSiteNNConfig(PretrainedConfig):
         return config_dict
         
     @classmethod
-    def from_dict(cls, config_dict):
+    def from_dict(cls, config_dict, **kwargs):
         """Create config from dict, handling irreps strings"""
         # Convert irreps strings back to Irreps objects
         for key in ["irreps_node_feats", "irreps_sh", "irreps_node_output", "irreps_head"]:
             if key in config_dict:
                 config_dict[key] = o3.Irreps(config_dict[key])
                 
-        return super().from_dict(config_dict)
+        return super().from_dict(config_dict, **kwargs)
 
 # expected outputs
 @dataclass
@@ -685,10 +686,10 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
         pos: torch.Tensor,
         residue_info: List[Dict],
         tokenizer: "AtomTokenizer",
-        output_dir: str,
+        output_file: str,
         num_steps: int = 10,
         damping: float = 0.5,
-        batch_idx: Optional[torch.Tensor] = None
+        allow_movement: Optional[torch.Tensor] = None,
     ) -> None:
         """Simulate atomic movement based on model vector predictions.
         
@@ -698,30 +699,53 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             pos: [num_atoms, 3] Coordinates 
             residue_info: List of dicts with per-atom PDB info
             tokenizer: Tokenizer for atom/record types
-            output_dir: Directory to save PDB frames
+            output_file: File to save pdb frames
             num_steps: Number of simulation steps
             damping: Factor to scale predicted movement vectors
-            batch_idx: Optional [num_atoms] batch indices, defaults to all zeros
+            allow_movement: Optional [num_atoms] Boolean mask to allow movement, else all atoms move
         """
         from metalsitenn.io import save_metal_site
-        os.makedirs(output_dir, exist_ok=True)
-        
-        if batch_idx is None:
-            batch_idx = torch.zeros(len(atoms), dtype=torch.long)
+        if os.path.exists(output_file):
+            os.remove(output_file)
             
         curr_pos = pos.clone()
+
+        # save the starting frame
+        save_metal_site(
+            atoms=atoms,
+            atom_types=atom_types,
+            pos=curr_pos,
+            residue_info=residue_info,
+            tokenizer=tokenizer,
+            output_path=output_file,
+            append=True
+        )
         
+        # convert all dtypes to the same dtype as model parameters, 
+        # and put on device
+        correct_dtype = next(self.parameters()).dtype
+        curr_pos = curr_pos.to(correct_dtype).to(self.device)
+        atoms = atoms.to(self.device)
+        atom_types = atom_types.to(self.device)
+        if allow_movement is not None:
+            allow_movement = allow_movement.to(correct_dtype).to(self.device)
+
+
         for i in range(num_steps):
             # Get movement vectors from model
             outputs = self.forward(
                 atoms=atoms,
                 atom_types=atom_types,
                 pos=curr_pos,
-                batch_idx=batch_idx
+                batch_idx=torch.zeros(len(atoms), dtype=atoms.dtype).to(atoms.device),
             )
+
+            movement_vectors = outputs.output_vectors
+            if allow_movement is not None:
+                movement_vectors = movement_vectors * allow_movement[:, None]
             
             # Update positions with damping
-            curr_pos = curr_pos + outputs.output_vectors * damping
+            curr_pos = curr_pos + (movement_vectors * damping)
             
             # Save frame
             save_metal_site(
@@ -730,7 +754,8 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
                 pos=curr_pos,
                 residue_info=residue_info,
                 tokenizer=tokenizer,
-                output_path=os.path.join(output_dir, f"{i:03d}.pdb")
+                output_path=output_file,
+                append=True,
             )
 
                 

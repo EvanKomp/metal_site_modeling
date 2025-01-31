@@ -68,6 +68,7 @@ def NO_MASKING_EMBED_AND_CLUSTER(
     embeddings_all = []
     for batch in eval_dataloader:
         with torch.no_grad():
+            model = trainer.accelerator.unwrap_model(trainer.model)
 
             # update the batch to use actual tokens instead of masks and actual positions
             batch['atoms'] = batch['atom_labels']
@@ -75,7 +76,7 @@ def NO_MASKING_EMBED_AND_CLUSTER(
             batch['pos'] = batch['pos'] + batch['denoise_vectors']
 
             # get the embeddings
-            embeddings = trainer.model.embed_systems(
+            embeddings = model.embed_systems(
                 atoms=batch['atoms'],
                 atom_types=batch['atom_types'],
                 pos=batch['pos'],
@@ -131,17 +132,40 @@ def NO_MASKING_EMBED_AND_CLUSTER(
     return
 
 """Metrics used during evaluation that can be computed directly from model loss outputs."""
+def compute_atom_mask_accuracy(trainer, outputs, batch):
+    """Accuracy on predicting element"""
+    masked_labels = batch['atom_labels'][batch['mask']]
+    masked_preds = outputs['outputs'].atom_logits[batch['mask']].argmax(dim=-1)
+
+    return (masked_labels == masked_preds).float().mean().item()
+
+def compute_atom_type_accuracy(trainer, outputs, batch):
+    """Accuracy on poredicting hetatm or atm."""
+    masked_labels = batch['atom_type_labels'][batch['mask']]
+    masked_preds = outputs['outputs'].type_logits[batch['mask']].argmax(dim=-1)
+
+    return (masked_labels == masked_preds).float().mean().item()
+
+def compute_metal_accuracy(trainer, outputs, batch):
+    """Accuracy on specifically predicting the metal token"""
+    tokenizer = trainer.data_collator.tokenizer
+    metal_token = tokenizer.atom_vocab.metal_token
+
+    masked_labels = batch['atom_labels'][batch['mask']]
+    masked_preds = outputs['outputs'].atom_logits[batch['mask']].argmax(dim=-1)
+
+    # get the predictions for only masked tokens that are metals
+    metal_mask = masked_labels == metal_token
+    if sum(metal_mask) == 0:
+        return None
+    return (masked_labels[metal_mask] == masked_preds[metal_mask]).float().mean().item()
+
 COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING = {
-    'mask_loss': lambda outputs, batch: outputs['mask_loss'].item(),
-    'noise_loss': lambda outputs, batch: outputs['noise_loss'].item(),
-    'atom_mask_accuracy': lambda outputs, batch: (
-        outputs['outputs'].atom_logits[batch['mask']].argmax(dim=-1) == 
-        batch['atom_labels'][batch['mask']]
-    ).float().mean().item(),
-    'record_mask_accuracy': lambda outputs, batch: (
-        outputs['outputs'].type_logits[batch['mask']].argmax(dim=-1) == 
-        batch['atom_type_labels'][batch['mask']]
-    ).float().mean().item()
+    'mask_loss': lambda trainer, outputs, batch: outputs['mask_loss'].item(),
+    'noise_loss': lambda trainer, outputs, batch: outputs['noise_loss'].item(),
+    'atom_mask_accuracy': compute_atom_mask_accuracy,
+    'record_mask_accuracy': compute_atom_type_accuracy,
+    'metal_mask_accuracy': compute_metal_accuracy
 }
 
 @dataclass
@@ -263,7 +287,8 @@ class MetalSiteTrainer:
             log_with="dvclive",
             project_dir=args.output_dir
         )
-        logger.info(f"Accelerator params: {self.accelerator.__dict__}")
+        if self.accelerator.is_main_process:
+            logger.info(f"Accelerator params: {self.accelerator.__dict__}")
         self.accelerator.init_trackers(project_name="training", init_kwargs={
             "dvclive": {
                 "dir": os.path.join(args.output_dir, "dvclive"),
@@ -283,7 +308,7 @@ class MetalSiteTrainer:
         # Set up optimizer and scheduler   
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
-            lr=args.learning_rate if args.warmup_pct == 0 else args.learning_rate / 25,
+            lr=args.learning_rate,
             weight_decay=args.weight_decay
         )
         self.scheduler = OneCycleLR(
@@ -293,7 +318,6 @@ class MetalSiteTrainer:
             steps_per_epoch=len(self.train_dataloader),
             pct_start=args.warmup_pct
         )
-        self.n_warmup_steps = args.warmup_pct * args.num_epochs * len(self.train_dataloader)
 
         # Prepare everything with accelerator
         prepared = self.accelerator.prepare(
@@ -305,12 +329,15 @@ class MetalSiteTrainer:
         )
         self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.scheduler = prepared
 
+        self.n_warmup_steps = args.warmup_pct * args.num_epochs * len(self.train_dataloader)
+
         # hard eval metrics
         self.hard_eval_metrics = hard_eval_metrics or {}
 
         # create checkpointomg folder if not present
-        if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
-            os.makedirs(os.path.join(args.output_dir, "checkpoints"))
+        if self.accelerator.is_main_process:
+            if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
+                os.makedirs(os.path.join(args.output_dir, "checkpoints"))
 
     def _get_train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
@@ -382,10 +409,8 @@ class MetalSiteTrainer:
         total_loss = 0
         num_batches = 0
         
-        # Initialize metric totals 
-        metric_totals = {
-            name: 0.0 for name in self.eval_metrics.keys()
-        }
+        # Initialize metric accumulators for each process
+        process_metrics = {name: [] for name in self.eval_metrics.keys()}
         
         for batch in self.eval_dataloader:
             with torch.no_grad():
@@ -393,29 +418,34 @@ class MetalSiteTrainer:
                 loss = outputs["loss"]
                 total_loss += loss.detach().float()
                 
-                # Compute batch metrics
+                # Compute metrics on each process separately
                 if self.eval_metrics:
-                    gathered_outputs = self.accelerator.gather_for_metrics(outputs)
-                    gathered_batch = self.accelerator.gather_for_metrics(batch)
                     for name, func in self.eval_metrics.items():
-                        metric_val = func(gathered_outputs, gathered_batch)
-                        metric_totals[name] += metric_val
-                        
+                        metric_val = func(self, outputs, batch)
+                        if metric_val is not None:
+                            process_metrics[name].append(metric_val)
+                            
             num_batches += 1
 
-        # Average metrics across all batches
+        # Gather and average loss across processes
+        total_loss = self.accelerator.gather(total_loss).mean()
+        num_batches = self.accelerator.gather(torch.tensor(num_batches, device=self.accelerator.device, dtype=torch.float)).mean()
         avg_loss = total_loss / num_batches
-        
-        # Log all metrics at once
-        metrics = {"eval/loss": avg_loss.item()}
+
+        # Average metrics for each process then gather
+        metrics = {"eval/loss": avg_loss.cpu().item()}
         if self.eval_metrics:
-            metrics.update({
-                f"eval/{name}": total / num_batches 
-                for name, total in metric_totals.items()
-            })
+            for name, values in process_metrics.items():
+                if values:  # Only process if we have values
+                    process_avg = torch.tensor(sum(values) / len(values), device=self.accelerator.device)
+                    gathered_avgs = self.accelerator.gather(process_avg)
+                    metrics[f"eval/{name}"] = gathered_avgs.mean().cpu().item()
+                else:
+                    metrics[f"eval/{name}"] = float('nan')
+                    
         self.accelerator.log(metrics, step=self.global_step)
 
-        # now do any hard metrics
+        # Run any hard metrics
         for name, func in self.hard_eval_metrics.items():
             func(self)
         
@@ -430,23 +460,24 @@ class MetalSiteTrainer:
             self.accelerator.load_state(resume_from_checkpoint)
             logger.info(f"Resumed from checkpoint: {resume_from_checkpoint}")
 
-        logger.info(
-            f"Training with {self.accelerator.num_processes} processes on {self.accelerator.device.type}\n"
-            f" - output_dir: {self.args.output_dir}\n"
-            f" - examples in dataset: {len(self.train_dataset)}\n"
-            f" - per device batch size: {self.args.per_device_train_batch_size}\n"
-            f" - gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
+        if self.accelerator.is_main_process:
+            logger.info(
+                f"Training with {self.accelerator.num_processes} processes on {self.accelerator.device.type}\n"
+                f" - output_dir: {self.args.output_dir}\n"
+                f" - examples in dataset: {len(self.train_dataset)}\n"
+                f" - per device batch size: {self.args.per_device_train_batch_size}\n"
+                f" - gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
 
-            f" - effective batch size: {self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.accelerator.num_processes}\n"
-            f" - total epochs: {self.args.num_epochs}\n"
-            f" - steps per epoch: {len(self.train_dataloader)}\n"
-            f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
-            f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
-            f" - warmup steps: {self.n_warmup_steps}\n"
-            f" - log training loss every {self.args.logging_steps} steps\n"
-            f" - eval and checkpoint every {self.args.eval_steps} steps\n"
-            f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
-        )
+                f" - effective batch size: {self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.accelerator.num_processes}\n"
+                f" - total epochs: {self.args.num_epochs}\n"
+                f" - steps per epoch: {len(self.train_dataloader)}\n"
+                f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
+                f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
+                f" - warmup steps: {self.n_warmup_steps}\n"
+                f" - log training loss every {self.args.logging_steps} steps\n"
+                f" - eval and checkpoint every {self.args.eval_steps} steps\n"
+                f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
+            )
 
         # run eval before training
         self.evaluate()
@@ -503,29 +534,31 @@ class MetalSiteTrainer:
                     self.model.train()
 
                     # Save checkpoint
-                    output_dir = os.path.join(
-                        self.args.output_dir,
-                        "checkpoints",
-                        f"step_{self.global_step}"
-                    )
-                    self.save_checkpoint(output_dir)
-                    self._cleanup_checkpoints()
-
-                    if self.early_stopping:
-                        should_stop = self.early_stopping.step(
-                            eval_loss,
-                            self.global_step,
-                            self.args.early_stopping_improvement_fraction
+                    if self.accelerator.is_main_process:
+                        output_dir = os.path.join(
+                            self.args.output_dir,
+                            "checkpoints",
+                            f"step_{self.global_step}"
                         )
-                        if (should_stop and 
-                            self.early_stopping.counter >= self.args.early_stopping_patience):
-                            if self.global_step > self.n_warmup_steps:
-                                logger.info("Early stopping triggered")
-                                self._finish_up()
-                                return
+                        self.save_checkpoint(output_dir)
+                        self._cleanup_checkpoints()
+
+                        if self.early_stopping:
+                            should_stop = self.early_stopping.step(
+                                eval_loss,
+                                self.global_step,
+                                self.args.early_stopping_improvement_fraction
+                            )
+                            if (should_stop and 
+                                self.early_stopping.counter >= self.args.early_stopping_patience):
+                                if self.global_step > self.n_warmup_steps:
+                                    logger.info("Early stopping triggered")
+                                    self._finish_up()
+                                    return
                         
         # Finish up
-        self._finish_up()
+        if self.accelerator.is_main_process:
+            self._finish_up()
 
 
     def _finish_up(self):
