@@ -138,49 +138,49 @@ stages:
         training.dataloader_num_workers: 1
         training.debug_sample:
         training.early_stopping_improvement_fraction: 0.001
-        training.early_stopping_patience: 10
-        training.eval_steps: 100
+        training.early_stopping_patience: 5
+        training.eval_steps: 50
         training.frac_noise_loss: 0.5
-        training.gradient_accumulation_steps: 4
+        training.gradient_accumulation_steps: 1
         training.gradient_clipping: 1.0
-        training.learning_rate: 0.0001
+        training.learning_rate: 0.0002
         training.load_best_model_at_end: true
-        training.logging_steps: 10
+        training.logging_steps: 5
         training.mask_rate: 0.15
         training.noise_rate: 0.15
         training.noise_scale: 1.0
         training.num_epochs: 5
-        training.per_device_batch_size: 32
+        training.per_device_batch_size: 128
         training.use_early_stopping: true
         training.warmup_pct: 0.1
         training.weight_decay: 0.001
     outs:
     - path: data/model_pretraining/checkpoints
       hash: md5
-      md5: 0f2ec942d82f9b65d6f45488d35fc945.dir
-      size: 8972660
-      nfiles: 60
+      md5: baf2f4510fefcf97ace1a1bd871417c3.dir
+      size: 4486330
+      nfiles: 30
     - path: data/model_pretraining/dvclive/metrics.json
       hash: md5
-      md5: 8d941456e757d8f82fb8b020ef3359d6
-      size: 466
+      md5: 69972c437af397254dd72f41e5b2912d
+      size: 521
     - path: data/model_pretraining/dvclive/plots/custom/eval_2d_space.json
       hash: md5
-      md5: 865b79c07fa4d1ae00179eb3999c1a9b
-      size: 155176
+      md5: 3fae304b3ddcd7edc03844141e974459
+      size: 155282
     - path: data/model_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: f5b423cfadc4e383dc3b8ff6c3855876.dir
-      size: 31581
-      nfiles: 10
+      md5: 186fa66e5f8e461cd5fa3a67575c29d8.dir
+      size: 65189
+      nfiles: 11
     - path: data/model_pretraining/eval_2d_space
       hash: md5
-      md5: f6dca76d1e3597a69423bc4e69eec2f8.dir
-      size: 2026102
-      nfiles: 40
+      md5: bf35e4ae237668a0945396a88f677f01.dir
+      size: 4054157
+      nfiles: 80
     - path: data/model_pretraining/final_model
       hash: md5
-      md5: 10d8bc97e6c3026002840b84dccfd238.dir
+      md5: 1b22bf6e1d6149e31e583df003997813.dir
       size: 286383
       nfiles: 2
   1.4_compute_null_model:
@@ -193,8 +193,8 @@ stages:
       nfiles: 13
     - path: pipeline/1.4_compute_null_model.py
       hash: md5
-      md5: 216cc29669ad327b49c7fcfa482299bd
-      size: 3569
+      md5: 73276fc0e0df01aece0bc1937ed7eba7
+      size: 3882
     params:
       params.yaml:
         training.mask_rate: 0.15
@@ -203,5 +203,5 @@ stages:
     outs:
     - path: data/metrics/null_model_metrics.json
       hash: md5
-      md5: 821360c0f3273e7481a334c5f3877c99
-      size: 115
+      md5: a8333240a5021094ef74b1cac06350c2
+      size: 514

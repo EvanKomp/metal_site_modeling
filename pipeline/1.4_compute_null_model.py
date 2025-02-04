@@ -10,7 +10,7 @@ Outputs:
     data/metrics/null_model_metrics.json:
         - mask_accuracy: Accuracy of most common token prediction
         - type_accuracy: Accuracy of most common record type prediction  
-        - noise_mse: MSE of zero vector noise prediction
+        - noise_mae: mae of zero vector noise prediction
 '''
 import json
 from datasets import load_from_disk
@@ -43,7 +43,7 @@ def compute_metrics(dataset, collator, most_common_atom, most_common_type):
     correct_atoms = 0
     correct_types = 0
     total_masks = 0
-    total_mse = 0
+    total_mae = 0
     total_systems = 0
     
     for example in tqdm(dataset, desc="Computing metrics"):
@@ -66,7 +66,7 @@ def compute_metrics(dataset, collator, most_common_atom, most_common_type):
         
         # on a per system basis because thats what the eval metric noise loss is
         if any(batch['noise_mask']):
-            total_mse += torch.mean(
+            total_mae += torch.mean(
                 torch.sqrt((batch['denoise_vectors'][batch['noise_mask']]**2).sum(dim=1))
             ).item()
             total_systems += 1
@@ -74,7 +74,7 @@ def compute_metrics(dataset, collator, most_common_atom, most_common_type):
     return {
         'mask_accuracy': correct_atoms / total_masks,
         'type_accuracy': correct_types / total_masks,
-        'noise_mse': total_mse / total_systems if total_systems > 0 else 0
+        'noise_mae': total_mae / total_systems if total_systems > 0 else 0
     }
 
 def main():
