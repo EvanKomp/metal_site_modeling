@@ -8,7 +8,8 @@
 import pandas as pd
 from dataclasses import dataclass
 import re
-from typing import List, Tuple, Iterator
+from typing import List, Tuple, Iterator, Dict, Any
+import torch
 
 @dataclass
 class ParamsObj:
@@ -53,3 +54,46 @@ def get_emission_time_job_from_codecarbon_log(emissions_file: str, project_name:
     emissions = str(df['emissions'].iloc[0])
 
     return duration, emissions
+
+def compute_balanced_atom_weights_from_frequencies(freq_dict: Dict[str, float], temperature: float = 1.0) -> Dict[str, float]:
+    """Convert frequency dictionary to balanced weight dictionary with temperature scaling.
+    
+    Temperature closer to 0 makes weights more uniform, while higher temperatures 
+    increase the relative weighting of rare tokens.
+    
+    Args:
+        freq_dict: Dictionary mapping tokens to their frequencies
+        temperature: Factor to scale frequency differences. Range (0, inf).
+            temperature -> 0: weights become uniform
+            temperature = 1: standard inverse frequency weights
+            temperature > 1: amplifies differences between rare/common tokens
+        
+    Returns:
+        Dictionary mapping tokens to weight values that average to 1.0
+    """
+    # Apply temperature scaling to frequencies
+    scaled_freqs = {k: v**temperature for k,v in freq_dict.items()}
+    
+    # Convert frequencies to inverse weights
+    weights = {k: 1/v if v > 0 else 1.0 for k,v in scaled_freqs.items()}
+    
+    # Normalize to mean 1.0
+    mean_weight = sum(weights.values()) / len(weights)
+    return {k: w/mean_weight for k,w in weights.items()}
+
+def print_tensor_info(name: str, tensor: torch.Tensor):
+    """Print detailed tensor information for debugging.
+    
+    Args:
+        name: Identifier for the tensor
+        tensor: Tensor to analyze
+    """
+    print(f"\n=== {name} ===")
+    print(f"Shape: {tensor.shape}")
+    print(f"Strides: {tensor.stride()}")
+    print(f"Contiguous: {tensor.is_contiguous()}")
+    print(f"Device: {tensor.device}")
+    print(f"Requires grad: {tensor.requires_grad}")
+    if tensor.grad is not None:
+        print(f"Grad shape: {tensor.grad.shape}")
+        print(f"Grad strides: {tensor.grad.stride()}")

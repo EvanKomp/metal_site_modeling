@@ -38,6 +38,7 @@ stages:
     deps:
       - pipeline/1.4_compute_null_model.py
       - data/dataset/metal_site_dataset
+      - data/dataset/tokenizer.pkl
     params:
       - training.mask_rate
       - training.noise_rate
@@ -52,6 +53,7 @@ stages:
     - data/dataset/metal_site_dataset
     - data/dataset/tokenizer.pkl
     - data/training_avg_num_neighbors.json
+    - data/metrics/null_model_metrics.json
     params:
     - model.l
     - model.hidden_scale
@@ -66,6 +68,8 @@ stages:
     - model.proj_drop
     - model.drop_path_rate
     - model.label_smoothing_factor
+    - model.imbalance_loss_reweight
+    - model.imbalance_loss_temperature
     - training.debug_sample
     - training.mask_rate
     - training.noise_rate
@@ -100,6 +104,7 @@ stages:
     metrics:
     - data/model_pretraining/dvclive/metrics.json
     plots:
+    - data/plots/atom_weights.png
     - data/model_pretraining/dvclive/plots/metrics:
         x: step
     - data/model_pretraining/dvclive/plots/custom/eval_2d_space.json:

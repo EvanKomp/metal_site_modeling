@@ -47,8 +47,8 @@ stages:
       nfiles: 13
     - path: data/dataset/tokenizer.pkl
       hash: md5
-      md5: e4cb0108e6ed191e680ac8230f4faa40
-      size: 1188
+      md5: 504a06ed37a177a221550fd831fb7f09
+      size: 1192
   1.3_get_avg_num_neighbors:
     cmd: python pipeline/1.3_get_avg_num_neighbors.py
     deps:
@@ -191,6 +191,10 @@ stages:
       md5: 073db9a3f1ea26223777c3abbf416dd7.dir
       size: 3291760765
       nfiles: 13
+    - path: data/dataset/tokenizer.pkl
+      hash: md5
+      md5: 504a06ed37a177a221550fd831fb7f09
+      size: 1192
     - path: pipeline/1.4_compute_null_model.py
       hash: md5
       md5: 73276fc0e0df01aece0bc1937ed7eba7

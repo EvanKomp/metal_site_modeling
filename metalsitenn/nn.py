@@ -36,6 +36,8 @@ from equiformer.nets.graph_attention_transformer import (
     get_norm_layer
 )
 
+from .utils import print_tensor_info
+
 
 class AtomEmbeddingLayer(nn.Module):
     """Embeds categorical and continuous atomic features into irreps and raw encodings.
@@ -208,8 +210,14 @@ class GraphAttentionLayer(torch.nn.Module):
         self.heads_to_vec = AttnHeads2Vec(irreps_head)
         
         # Learned attention parameters
-        self.attention_dot = torch.nn.Parameter(torch.randn(1, num_heads, mul_alpha_head))
-        torch_geometric.nn.inits.glorot(self.attention_dot)
+        attention_dot = torch.empty(1, num_heads, mul_alpha_head)
+        torch_geometric.nn.inits.glorot(attention_dot)
+        self.attention_dot = torch.nn.Parameter(
+            attention_dot.transpose(0, -1).transpose(1, -1).contiguous()
+            .transpose(1, -1).transpose(0, -1)
+        )
+        # self.attention_dot = torch.nn.Parameter(torch.randn(1, num_heads, mul_alpha_head))
+        # torch_geometric.nn.inits.glorot(self.attention_dot)
 
         # Dropout modules
         self.attention_dropout = None if alpha_drop == 0.0 else torch.nn.Dropout(alpha_drop)
@@ -266,8 +274,11 @@ class GraphAttentionLayer(torch.nn.Module):
         value = self.value_to_heads(value)
 
         # Compute attention weights
+        # print_tensor_info("attention_dot", self.attention_dot)
+        # print_tensor_info("scores-pre", scores) 
         scores = self.score_activation(scores)
         scores = torch.einsum('bik,aik->bi', scores, self.attention_dot)
+        # print_tensor_info("scores-post", scores)
         scores = torch_geometric.utils.softmax(scores, edge_dst)
         scores = scores.unsqueeze(-1)
 

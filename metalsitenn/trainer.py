@@ -12,13 +12,16 @@ from dataclasses import dataclass, asdict, field
 import os
 import logging
 from typing import Optional, Dict, Any, Callable
+from datetime import timedelta
 
 import torch 
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data import DataLoader
 from accelerate import Accelerator
+from accelerate.utils import InitProcessGroupKwargs
 from tqdm import tqdm
 import numpy as np
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -268,7 +271,8 @@ class MetalSiteTrainer:
         eval_dataset=None,
         data_collator=None,
         eval_metrics: Optional[Dict[str, Callable]]=None,
-        hard_eval_metrics: Optional[Dict[str, Callable]]=None
+        hard_eval_metrics: Optional[Dict[str, Callable]]=None,
+        quit_early: bool = False
     ):
         self.args = args
         self.model = model
@@ -282,10 +286,12 @@ class MetalSiteTrainer:
         self.early_stopping = EarlyStoppingState() if args.use_early_stopping else None
         
         # Initialize accelerator
+        ipgk = InitProcessGroupKwargs(timeout=timedelta(180))
         self.accelerator = Accelerator(
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             log_with="dvclive",
-            project_dir=args.output_dir
+            project_dir=args.output_dir,
+            kwargs_handlers=[ipgk]
         )
         if self.accelerator.is_main_process:
             logger.info(f"Accelerator params: {self.accelerator.__dict__}")
@@ -338,6 +344,8 @@ class MetalSiteTrainer:
         if self.accelerator.is_main_process:
             if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
                 os.makedirs(os.path.join(args.output_dir, "checkpoints"))
+        self.quit_early = quit_early
+        os.environ["NCCL_DEBUG"] = "INFO"
 
     def _get_train_dataloader(self) -> DataLoader:
         """Create training dataloader."""
@@ -365,7 +373,7 @@ class MetalSiteTrainer:
         with torch.no_grad():
             self.model(**dummy_batch)
         
-        self.accelerator.save_state(output_dir)
+        self.accelerator.save_state(output_dir, safe_serialization=False)
 
     def load_checkpoint(self, checkpoint_dir: str):
         """Load checkpoint with dynamic parameter handling"""
@@ -449,6 +457,8 @@ class MetalSiteTrainer:
         for name, func in self.hard_eval_metrics.items():
             func(self)
         
+        self.model.train()
+        torch.cuda.empty_cache()
         return avg_loss.item()
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
@@ -480,8 +490,9 @@ class MetalSiteTrainer:
             )
 
         # run eval before training
-        self.evaluate()
-
+        if not self.quit_early:
+            self.evaluate()
+        
         # Training loop
         for epoch in range(self.args.num_epochs):
             self.model.train()
@@ -507,6 +518,10 @@ class MetalSiteTrainer:
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                         self.scheduler.step()
+
+                        if self.quit_early:
+                            logger.info("Quitting early")
+                            return
 
                     total_loss += loss.detach().float()
 

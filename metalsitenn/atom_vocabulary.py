@@ -11,6 +11,7 @@ from typing import List, Union, Dict, Set, Optional
 import torch
 import numpy as np
 from .constants import (METAL_IONS, RECORD_TYPES, COMMON_PROTEIN_ATOMS, UNCOMMON_PROTEIN_ATOMS)
+from .utils import compute_balanced_atom_weights_from_frequencies
 import copy
 from pathlib import Path
 import json
@@ -114,6 +115,7 @@ class AtomVocabulary(BaseVocabulary):
             self.metal_token = None
         else:
             next_token = self._get_next_token_index()
+            self.stoi['<METAL>'] = next_token
             for metal in METAL_IONS:
                 self.stoi[metal] = next_token
             self.metal_token = next_token
@@ -274,3 +276,35 @@ class AtomTokenizer:
             'atoms': self._decode_atoms(atoms) if atoms is not None else None,
             'atom_types': self._decode_records(atom_types) if atom_types is not None else None
         }
+    
+    def get_token_weights(self, freq_dict: Dict[str, float], temperature: float = 1.0, cutoff_token: str=None) -> Dict[str, float]:
+        """Get balanced weights for each token in the vocabulary.
+        
+        Args:
+            freq_dict: Dictionary mapping tokens to their frequencies
+            temperature: Factor to scale frequency differences. Range (0, inf).
+                temperature -> 0: weights become uniform
+                temperature = 1: standard inverse frequency weights
+                temperature > 1: amplifies differences between rare/common tokens
+            cutoff_token: If specified, no token will have a higher weight than this one, even if more rare.
+                
+        Returns:
+            Dictionary mapping tokens to weight values that average to 1.0
+        """
+        token_to_weight = compute_balanced_atom_weights_from_frequencies(freq_dict, temperature)
+        if cutoff_token is not None:
+            cutoff_weight = token_to_weight[cutoff_token]
+            for token, weight in token_to_weight.items():
+                if weight > cutoff_weight:
+                    token_to_weight[token] = cutoff_weight
+            # reweigh to MEAN 1 (not sum 1)
+            mean_weight = np.mean(list(token_to_weight.values()))
+            for token, weight in token_to_weight.items():
+                token_to_weight[token] = weight / mean_weight
+
+        weights = torch.ones(self.atom_vocab.vocab_size)
+        for token, weight in token_to_weight.items():
+            if token in self.atom_vocab.stoi:
+                weights[self.atom_vocab.stoi[token]] = weight
+
+        return weights, token_to_weight

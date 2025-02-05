@@ -15,6 +15,14 @@ from e3nn import o3
 import joblib
 import json
 import os
+import argparse
+import traceback
+import inspect
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+sns.set_style("white")
+sns.set_context("talk")
 
 from metalsitenn.model import (
     MetalSiteNNConfig, 
@@ -45,7 +53,53 @@ def load_datasets(data_dir: Path):
     dataset = load_from_disk(data_dir)
     return dataset["train"], dataset["test"]
 
-def main():
+def get_atom_weights(tokenizer: AtomTokenizer, params: ParamsObj):
+    with open("data/metrics/null_model_metrics.json", 'r') as f:
+        null_model_metrics = json.load(f)
+    bad_keys = []
+    for key in null_model_metrics:
+        if key not in tokenizer.atom_vocab.stoi:
+            bad_keys.append(key)
+    for key in bad_keys:
+        null_model_metrics.pop(key)
+    
+    if params.model.imbalance_loss_reweight:
+        temperature = params.model.imbalance_loss_temperature
+    else:
+        temperature = 0.0
+
+    cutoff_token = '<METAL>' if not params.data.metal_known else 'CU'
+    atom_weights, freq_dict = tokenizer.get_token_weights(freq_dict=null_model_metrics, temperature=temperature, cutoff_token=cutoff_token)
+
+    logger.info(f"Atom weights: {freq_dict}")
+
+    # make a plot of the atom weights from the dict
+    fig, ax = plt.subplots(figsize=(10, 5))
+    sns.barplot(x=list(freq_dict.keys()), y=list(freq_dict.values()), ax=ax)
+    plt.savefig("data/plots/atom_weights.png", dpi=300, bbox_inches='tight')
+    plt.close()
+    return atom_weights
+
+# def debug_grad_layout():
+#     """Hook into gradient computations to track layouts."""
+#     def grad_hook(grad, param_name):
+#         if grad is not None and grad.shape == (1, 4, 12):  # Only look at problem size
+#             print(f"\nGradient for parameter {param_name}:")
+#             print(f"Shape: {grad.shape}")
+#             print(f"Strides: {grad.stride()}")
+#             print(f"Is contiguous: {grad.is_contiguous()}")
+#         return grad
+
+#     def hook_params(module):
+#         for name, p in module.named_parameters():
+#             if p.requires_grad:
+#                 p.register_hook(lambda g, n=name: grad_hook(g, n))
+
+#     return hook_params
+
+
+def main(quit_early=False):
+    # torch.cuda.memory._record_memory_history()
     # Load DVC params
     params = ParamsObj(dvc.api.params_show())
     
@@ -114,6 +168,12 @@ def main():
 
     model = MetalSiteForPretrainingModel(config)
 
+    # get atom weights for loss
+    atom_weights = get_atom_weights(tokenizer, params)
+    model.set_atom_weights(atom_weights)
+
+    # model.apply(debug_grad_layout())
+
     # now trainer
     logger.info("Initializing trainer...")
     training_args = MetalSiteTrainingArgs(
@@ -164,8 +224,10 @@ def main():
         eval_dataset=test_dataset,
         data_collator=collator,
         eval_metrics=COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING,
-        hard_eval_metrics={'cluster': eval_embed_and_cluster_func}
+        hard_eval_metrics={'cluster': eval_embed_and_cluster_func},
+        quit_early=quit_early
     )
+
     # Train
     logger.info("Training model...")
     trainer.train()
@@ -175,7 +237,10 @@ def main():
     model.save_pretrained(os.path.join(output_dir, "final_model"))
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--quit-early', action='store_true')
+    args = parser.parse_args()
+    main(quit_early=args.quit_early)
 
 
         

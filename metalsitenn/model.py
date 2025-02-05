@@ -442,8 +442,16 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             atom_vocab_size=config.atom_vocab_size,
             atom_type_vocab_size=config.atom_type_vocab_size,
         )
-        self.cel = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor,
+        # calculate weights if provided
+
+
+        self.cel_atom = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor,
                                        reduction='none')
+        self.cel_atom_type = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor, reduction='none')
+        
+    def set_atom_weights(self, atom_weights: torch.Tensor):
+        self.cel_atom = nn.CrossEntropyLoss(label_smoothing=self.config.label_smoothing_factor,
+            reduction='none', weight=atom_weights)
         
     def state_dict(self, *args, destination=None, prefix='', keep_vars=False):
         """Override state_dict to handle dynamic parameters"""
@@ -484,13 +492,26 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             'denoise_vectors': torch.zeros(num_nodes, 3)
         }
 
-    def compute_mask_loss(self, atom_logits, atom_labels, mask_indices, batch_idx):
+    def compute_mask_loss_atoms(self, atom_logits, atom_labels, mask_indices, batch_idx):
         """Loss normalized per system"""
         mask = mask_indices.bool()
         # Compute loss per atom
-        per_atom_loss = self.cel(
+        per_atom_loss = self.cel_atom(
             atom_logits[mask],
             atom_labels[mask],
+        )
+        # Mean within each system then mean across systems
+        # removes bias of large systems
+        system_losses = scatter(per_atom_loss, batch_idx[mask], reduce='mean')
+        return system_losses.mean()
+    
+    def compute_mask_loss_types(self, type_logits, atom_type_labels, mask_indices, batch_idx):
+        """Loss normalized per system"""
+        mask = mask_indices.bool()
+        # Compute loss per atom
+        per_atom_loss = self.cel_atom_type(
+            type_logits[mask],
+            atom_type_labels[mask],
         )
         # Mean within each system then mean across systems
         # removes bias of large systems
@@ -545,15 +566,15 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
         # Compute losses if labels provided
         mask_loss = None
         if mask is not None and atom_labels is not None:
-            mask_loss = self.compute_mask_loss(
+            mask_loss = self.compute_mask_loss_atoms(
                 atom_logits=atom_logits,
                 atom_labels=atom_labels,
                 mask_indices=mask,  # Pass mask indices
                 batch_idx=batch_idx
             )
-            mask_loss += self.compute_mask_loss(
-                atom_logits=type_logits,
-                atom_labels=atom_type_labels,
+            mask_loss += self.compute_mask_loss_types(
+                type_logits=type_logits,
+                atom_type_labels=atom_type_labels,
                 mask_indices=mask,  # Pass mask indices
                 batch_idx=batch_idx
             )

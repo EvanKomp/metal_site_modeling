@@ -18,19 +18,21 @@ model:
   proj_drop: 0.0 # Dropout rate for projection layers
   drop_path_rate: 0.0 # Drop path rate for stochastic depth
   label_smoothing_factor: 0.1 # Label smoothing factor for cross entropy loss
+  imbalance_loss_reweight: true # Reweight loss based on class imbalance
+  imbalance_loss_temperature: .35 # Temperature parameter for reweighting
 
 training:
-  debug_sample: null # Number of samples to use for debugging
+  debug_sample: 200 # Number of samples to use for debugging
   mask_rate: 0.15 # Fraction of atoms to mask during training
   noise_rate: 0.15 # Fraction of coordinates to noise during training
   noise_scale: 1.0 # Standard deviation of noise to apply to coordinates - Units of Angstrom.
 
-  eval_steps: 50 # Number of steps to evaluate model on validation set (and save a checkpoint)
+  eval_steps: 10 # Number of steps to evaluate model on validation set (and save a checkpoint)
   logging_steps: 5 # Number of steps to log training metrics
   load_best_model_at_end: true # Load the best model at the end of training
 
   num_epochs: 5 # Number of epochs to train for
-  per_device_batch_size: 128 # Number of MFS systems per batch
+  per_device_batch_size: 5 # Number of MFS systems per batch
   gradient_accumulation_steps: 1 # Number of steps to accumulate gradients over
   dataloader_num_workers: 1 # Number of workers to use for data loading
   learning_rate: 2e-4 # Learning rate for Adam optimizer
