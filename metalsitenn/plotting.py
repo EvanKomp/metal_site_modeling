@@ -87,27 +87,33 @@ def plot_atoms_and_vectors(
         # Convert tensor indices to tokens if needed
         if isinstance(atom_tokens, torch.Tensor):
             atom_tokens = [tokenizer.atom_vocab.itos[idx.item()] for idx in atom_tokens]
-            
-        unique_tokens = sorted(set(atom_tokens))
+
+        # get token indices and all possible indices
+        unique_indices = set(tokenizer.atom_vocab.stoi.values())
+        atom_indices = [tokenizer.atom_vocab.stoi[token] for token in atom_tokens]
         cmap = plt.cm.tab20
         
         # Create color mapping
-        color_dict = {token: cmap(i/len(unique_tokens)) for i, token in enumerate(unique_tokens)}
-        colors = [color_dict[token] for token in atom_tokens]
+        color_dict = {ind: cmap(i/len(unique_indices)) for i, ind in enumerate(unique_indices)}
+        colors = [color_dict[ind] for ind in atom_indices]
+
+        # create token to color to legend
+        token_to_color = {token: color_dict[ind] for token, ind in tokenizer.atom_vocab.stoi.items()}
         
     else:
         # Default grey for all markers
         colors = ['grey'] * len(positions)
+        token_to_color = None
 
     # Create legend elements
     legend_elements = []
     
     # Add color legend if using atom_tokens
-    if atom_tokens is not None:
+    if token_to_color is not None:
         legend_elements.extend([
-            Line2D([0], [0], marker='o', color='w', markerfacecolor=color_dict[token],
-                  label=token, markersize=10) 
-            for token in unique_tokens
+            Line2D([0], [0], marker='o', color='w', label=token, 
+                  markerfacecolor=color, markersize=10)
+            for token, color in token_to_color.items()
         ])
         
     # Add shape legend if using atom_types

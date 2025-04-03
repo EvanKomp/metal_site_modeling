@@ -1,0 +1,6 @@
+outs:
+- md5: 73e0b7eee217068d63aee98df6740fac.dir
+  size: 5383821905
+  nfiles: 314920
+  hash: md5
+  path: mf_sites

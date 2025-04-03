@@ -38,6 +38,9 @@ from equiformer.nets.graph_attention_transformer import (
 
 from .utils import print_tensor_info
 
+import logging
+logger = logging.getLogger(__name__)
+
 
 class AtomEmbeddingLayer(nn.Module):
     """Embeds categorical and continuous atomic features into irreps and raw encodings.
@@ -504,6 +507,7 @@ class MetalSiteFoundationalBackbone(torch.nn.Module):
         atom_type_vocab_size: Number of record types. Default: 3
         atom_embed_dim: Dimension for atomic feature embedding. Default: 16
         max_radius: Maximum radius (Å) for edges. Default: 6.0
+        max_neighbors: Maximum number of neighbors. Default: 12
         num_basis: Number of radial basis functions. Default: 32 
         fc_neurons: Hidden layer sizes for radial networks
         irreps_head: Feature irreps per attention head
@@ -525,6 +529,7 @@ class MetalSiteFoundationalBackbone(torch.nn.Module):
         atom_type_vocab_size: int = 3,
         atom_embed_dim: int = 16,
         max_radius: float = 6.0,
+        max_neighbors: int = 12,
         num_basis: int = 32,
         fc_neurons: List[int] = [32, 32],
         irreps_head: o3.Irreps = o3.Irreps('32x0e+16x1o+8x2e'),
@@ -553,6 +558,7 @@ class MetalSiteFoundationalBackbone(torch.nn.Module):
         self.num_layers = num_layers
         self.output_attentions = output_attentions
         self.output_hidden_states = output_hidden_states
+        self.max_neighbors = max_neighbors
 
         oh_size = atom_vocab_size + atom_type_vocab_size
 
@@ -636,8 +642,9 @@ class MetalSiteFoundationalBackbone(torch.nn.Module):
         """
         # Get edges
         edge_src, edge_dst = radius_graph(
-            pos, r=self.max_radius, batch=batch_idx, loop=False
+            pos, r=self.max_radius, batch=batch_idx, loop=False, max_num_neighbors=self.max_neighbors
         )
+        logger.debug(f"Edges in batch: {edge_src.shape[0]}")
         edge_vec = pos.index_select(0, edge_src) - pos.index_select(0, edge_dst)
         
         # Edge features

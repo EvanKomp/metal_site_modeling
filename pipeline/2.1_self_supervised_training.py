@@ -16,8 +16,6 @@ import joblib
 import json
 import os
 import argparse
-import traceback
-import inspect
 
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -80,25 +78,8 @@ def get_atom_weights(tokenizer: AtomTokenizer, params: ParamsObj):
     plt.close()
     return atom_weights
 
-# def debug_grad_layout():
-#     """Hook into gradient computations to track layouts."""
-#     def grad_hook(grad, param_name):
-#         if grad is not None and grad.shape == (1, 4, 12):  # Only look at problem size
-#             print(f"\nGradient for parameter {param_name}:")
-#             print(f"Shape: {grad.shape}")
-#             print(f"Strides: {grad.stride()}")
-#             print(f"Is contiguous: {grad.is_contiguous()}")
-#         return grad
 
-#     def hook_params(module):
-#         for name, p in module.named_parameters():
-#             if p.requires_grad:
-#                 p.register_hook(lambda g, n=name: grad_hook(g, n))
-
-#     return hook_params
-
-
-def main(quit_early=False):
+def main(quit_early=False, resume_from_checkpoint=None):
     # torch.cuda.memory._record_memory_history()
     # Load DVC params
     params = ParamsObj(dvc.api.params_show())
@@ -111,7 +92,11 @@ def main(quit_early=False):
     
     # Load datasets
     logger.info("Loading datasets...")
-    train_dataset, test_dataset = load_datasets(Path("data/dataset/metal_site_dataset"))
+    if not params.training.debug_use_toy:
+        train_dataset, test_dataset = load_datasets(Path("data/dataset/metal_site_dataset"))
+    else:
+        train_dataset, test_dataset = load_datasets(Path("data/toy_dataset"))
+    
     if params.training.debug_sample:
         train_dataset = train_dataset.select(range(params.training.debug_sample))
         test_dataset = test_dataset.select(range(params.training.debug_sample))
@@ -149,6 +134,7 @@ def main(quit_early=False):
         # direct user params
         atom_embed_dim=params.model.atom_embed_dim,
         max_radius=params.model.max_radius,
+        max_neighbors=params.model.max_neighbors,
         num_basis=params.model.num_basis,
         num_layers=params.model.num_layers,
         num_heads=params.model.num_heads,
@@ -172,7 +158,7 @@ def main(quit_early=False):
     atom_weights = get_atom_weights(tokenizer, params)
     model.set_atom_weights(atom_weights)
 
-    # model.apply(debug_grad_layout())
+    logger.info(model)
 
     # now trainer
     logger.info("Initializing trainer...")
@@ -216,6 +202,7 @@ def main(quit_early=False):
     eval_embed_and_cluster_func = lambda trainer: NO_MASKING_EMBED_AND_CLUSTER(
         trainer, embedding_how=params.embedding.how, cluster_kwargs=cluster_kwargs, tsne_kwargs=tsne_kwargs, hidden_state=params.embedding.hidden_state)
 
+    resume = resume_from_checkpoint is not None
     trainer = MetalSiteTrainer(
         model=model,
         compute_loss_fn=COMPUTE_LOSS_SELF_SUPERVISED_TRAINING,
@@ -225,12 +212,13 @@ def main(quit_early=False):
         data_collator=collator,
         eval_metrics=COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING,
         hard_eval_metrics={'cluster': eval_embed_and_cluster_func},
-        quit_early=quit_early
+        quit_early=quit_early,
+        resume=resume
     )
 
     # Train
     logger.info("Training model...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
     logger.info("Training complete.")
 
     # save final model and args so that it can be reloaded
@@ -239,8 +227,9 @@ def main(quit_early=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--quit-early', action='store_true')
+    parser.add_argument('--resume_from_checkpoint', type=str, default=None)
     args = parser.parse_args()
-    main(quit_early=args.quit_early)
+    main(quit_early=args.quit_early, resume_from_checkpoint=args.resume_from_checkpoint)
 
 
         

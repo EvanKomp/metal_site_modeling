@@ -272,7 +272,8 @@ class MetalSiteTrainer:
         data_collator=None,
         eval_metrics: Optional[Dict[str, Callable]]=None,
         hard_eval_metrics: Optional[Dict[str, Callable]]=None,
-        quit_early: bool = False
+        quit_early: bool = False,
+        resume: bool = False
     ):
         self.args = args
         self.model = model
@@ -293,14 +294,14 @@ class MetalSiteTrainer:
             project_dir=args.output_dir,
             kwargs_handlers=[ipgk]
         )
-        if self.accelerator.is_main_process:
-            logger.info(f"Accelerator params: {self.accelerator.__dict__}")
+        logger.info(f"Accelerator params: {self.accelerator.__dict__}")
         self.accelerator.init_trackers(project_name="training", init_kwargs={
             "dvclive": {
                 "dir": os.path.join(args.output_dir, "dvclive"),
                 "report": 'md',
                 "save_dvc_exp": False,
-                "dvcyaml": None
+                "dvcyaml": None,
+                'resume': resume
             }
         })
         
@@ -341,9 +342,9 @@ class MetalSiteTrainer:
         self.hard_eval_metrics = hard_eval_metrics or {}
 
         # create checkpointomg folder if not present
-        if self.accelerator.is_main_process:
-            if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
-                os.makedirs(os.path.join(args.output_dir, "checkpoints"))
+        if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
+            os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
+
         self.quit_early = quit_early
         os.environ["NCCL_DEBUG"] = "INFO"
 
@@ -372,6 +373,9 @@ class MetalSiteTrainer:
         dummy_batch = next(iter(self.train_dataloader))
         with torch.no_grad():
             self.model(**dummy_batch)
+
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir, exist_ok=True)
         
         self.accelerator.save_state(output_dir, safe_serialization=False)
 
@@ -462,32 +466,39 @@ class MetalSiteTrainer:
         return avg_loss.item()
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
+        # get memory used on this gpu
+        mem = torch.cuda.memory_allocated() / 1e9
+        logger.info(f"Memory used on GPU: {mem} GB")
+        
         # Add global step tracking
         self.global_step = 0
         if resume_from_checkpoint:
             # Assuming checkpoint contains global step
             self.global_step = int(resume_from_checkpoint.split('_')[-1])
+            steps_per_epoch = len(self.train_dataloader)
+            steps_to_skip = self.global_step % steps_per_epoch
             self.accelerator.load_state(resume_from_checkpoint)
+            self.train_dataloader = self.accelerator.skip_first_batches(self.train_dataloader, steps_to_skip)
             logger.info(f"Resumed from checkpoint: {resume_from_checkpoint}")
 
-        if self.accelerator.is_main_process:
-            logger.info(
-                f"Training with {self.accelerator.num_processes} processes on {self.accelerator.device.type}\n"
-                f" - output_dir: {self.args.output_dir}\n"
-                f" - examples in dataset: {len(self.train_dataset)}\n"
-                f" - per device batch size: {self.args.per_device_train_batch_size}\n"
-                f" - gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
 
-                f" - effective batch size: {self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.accelerator.num_processes}\n"
-                f" - total epochs: {self.args.num_epochs}\n"
-                f" - steps per epoch: {len(self.train_dataloader)}\n"
-                f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
-                f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
-                f" - warmup steps: {self.n_warmup_steps}\n"
-                f" - log training loss every {self.args.logging_steps} steps\n"
-                f" - eval and checkpoint every {self.args.eval_steps} steps\n"
-                f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
-            )
+        logger.info(
+            f"Training with {self.accelerator.num_processes} processes on {self.accelerator.device.type}\n"
+            f" - output_dir: {self.args.output_dir}\n"
+            f" - examples in dataset: {len(self.train_dataset)}\n"
+            f" - per device batch size: {self.args.per_device_train_batch_size}\n"
+            f" - gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
+
+            f" - effective batch size: {self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.accelerator.num_processes}\n"
+            f" - total epochs: {self.args.num_epochs}\n"
+            f" - steps per epoch: {len(self.train_dataloader)}\n"
+            f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
+            f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
+            f" - warmup steps: {self.n_warmup_steps}\n"
+            f" - log training loss every {self.args.logging_steps} steps\n"
+            f" - eval and checkpoint every {self.args.eval_steps} steps\n"
+            f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
+        )
 
         # run eval before training
         if not self.quit_early:
@@ -505,6 +516,7 @@ class MetalSiteTrainer:
 
             for batch in progress_bar:
                 with self.accelerator.accumulate(self.model):
+                    logger.debug(f"N nodes in graph: {len(batch['atoms'])}")
                     outputs = self.compute_loss_fn(self, batch)
                     loss = outputs["loss"]
                     
@@ -549,31 +561,34 @@ class MetalSiteTrainer:
                     self.model.train()
 
                     # Save checkpoint
+                    output_dir = os.path.join(
+                        self.args.output_dir,
+                        "checkpoints",
+                        f"step_{self.global_step}"
+                    )
+                    # Ensure the directory exists on all processes before saving
                     if self.accelerator.is_main_process:
-                        output_dir = os.path.join(
-                            self.args.output_dir,
-                            "checkpoints",
-                            f"step_{self.global_step}"
-                        )
-                        self.save_checkpoint(output_dir)
+                        os.makedirs(output_dir, exist_ok=True)
+                    self.accelerator.wait_for_everyone()  # Wait for directory creation to complete
+                    self.save_checkpoint(output_dir)
+                    if self.accelerator.is_main_process:
                         self._cleanup_checkpoints()
 
-                        if self.early_stopping:
-                            should_stop = self.early_stopping.step(
-                                eval_loss,
-                                self.global_step,
-                                self.args.early_stopping_improvement_fraction
-                            )
-                            if (should_stop and 
-                                self.early_stopping.counter >= self.args.early_stopping_patience):
-                                if self.global_step > self.n_warmup_steps:
-                                    logger.info("Early stopping triggered")
-                                    self._finish_up()
-                                    return
+                    if self.early_stopping:
+                        should_stop = self.early_stopping.step(
+                            eval_loss,
+                            self.global_step,
+                            self.args.early_stopping_improvement_fraction
+                        )
+                        if (should_stop and 
+                            self.early_stopping.counter >= self.args.early_stopping_patience):
+                            if self.global_step > self.n_warmup_steps:
+                                logger.info("Early stopping triggered")
+                                self._finish_up()
+                                return
                         
-        # Finish up
-        if self.accelerator.is_main_process:
-            self._finish_up()
+
+        self._finish_up()
 
 
     def _finish_up(self):

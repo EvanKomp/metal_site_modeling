@@ -91,7 +91,10 @@ def main():
     )
     
     # Load dataset
-    dataset = load_from_disk("data/dataset/metal_site_dataset")
+    if not params.training.debug_use_toy:
+        dataset = load_from_disk("data/dataset/metal_site_dataset")
+    else:
+        dataset = load_from_disk("data/toy_dataset")
     
     # Get most common tokens from training set
     atom_counter, most_common_atom = count_masked_tokens(dataset["train"], collator, 'atom_labels')

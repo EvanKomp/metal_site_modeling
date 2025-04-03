@@ -30,7 +30,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # a helper function to generate the irreps for the model
-def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple[o3.Irreps, o3.Irreps]:
+def get_irreps(l: int, scale: int, decay: float, num_heads: int = None, only_natural_parity: bool=True) -> tuple[o3.Irreps, o3.Irreps]:
     """Generate scalable irreps for network features and attention heads.
     
     Args:
@@ -38,7 +38,7 @@ def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple
         scale: Base multiplicity for l=0 irreps
         decay: Factor to reduce multiplicity for each l (decay^l)
         num_heads: If provided, returns attention head irreps with multiplicities divided by num_heads
-    
+        only_natural_parity: If True, only include irreps with natural parity
     Returns:
         hidden_irreps: Full irreps for hidden features
         head_irreps: Irreps for attention heads if num_heads provided, else None
@@ -51,21 +51,29 @@ def get_irreps(l: int, scale: int, decay: float, num_heads: int = None) -> tuple
         mult = int(scale * (decay ** i))
         if mult == 0:
             continue
-            
+        
+        if not only_natural_parity:
         # Add even and odd irreps of order i
-        irreps.extend([
-            (mult, (i, 1)),  # even
-            (mult, (i, -1))  # odd
-        ])
+            irreps.extend([
+                (mult, (i, 1)),  # even
+                (mult, (i, -1))  # odd
+            ])
+        else:
+            parity = 1 if i % 2 == 0 else -1
+            irreps.append((mult, (i, parity)))
         
         # Calculate head multiplicities if requested
         if num_heads is not None:
             head_mult = math.ceil(mult / num_heads)
             if head_mult > 0:
-                head_irreps.extend([
-                    (head_mult, (i, 1)),
-                    (head_mult, (i, -1))
-                ])
+
+                if not only_natural_parity:
+                    head_irreps.extend([
+                        (head_mult, (i, 1)),
+                        (head_mult, (i, -1))
+                    ])
+                else:
+                    head_irreps.append((head_mult, (i, parity)))
     
     hidden_irreps = o3.Irreps(irreps)
     head_irreps = o3.Irreps(head_irreps) if num_heads is not None else None
@@ -92,6 +100,8 @@ class MetalSiteNNConfig(PretrainedConfig):
             Dimension of atomic embeddings
         max_radius: float = 5.0 
             Maximum radius (Å) for edges
+        max_neighbors: int = 12
+            Maximum neighbors per atoms for graphs
         num_basis: int = 32
             Number of radial basis functions
         fc_neurons: List[int] = [32, 32]
@@ -124,6 +134,7 @@ class MetalSiteNNConfig(PretrainedConfig):
         atom_type_vocab_size: int = 3,
         atom_embed_dim: int = 16,
         max_radius: float = 5.0,
+        max_neighbors: int = 12,
         num_basis: int = 32,
         fc_neurons: List[int] = [32,32],
         irreps_head: o3.Irreps = o3.Irreps('32x0e+16x1o+8x2e'),
@@ -148,6 +159,7 @@ class MetalSiteNNConfig(PretrainedConfig):
         self.atom_type_vocab_size = atom_type_vocab_size
         self.atom_embed_dim = atom_embed_dim
         self.max_radius = max_radius
+        self.max_neighbors = max_neighbors
         self.num_basis = num_basis
         self.fc_neurons = fc_neurons
         self.irreps_head = o3.Irreps(irreps_head)
@@ -260,6 +272,7 @@ class MetalSiteFoundationalModel(MetalSitePretrainedModel):
             atom_type_vocab_size=config.atom_type_vocab_size,
             atom_embed_dim=config.atom_embed_dim,
             max_radius=config.max_radius,
+            max_neighbors=config.max_neighbors,
             num_basis=config.num_basis,
             fc_neurons=config.fc_neurons,
             irreps_head=config.irreps_head,

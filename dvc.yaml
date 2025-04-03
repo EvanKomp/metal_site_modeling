@@ -38,8 +38,10 @@ stages:
     deps:
       - pipeline/1.4_compute_null_model.py
       - data/dataset/metal_site_dataset
+      - data/toy_dataset
       - data/dataset/tokenizer.pkl
     params:
+      - training.debug_use_toy
       - training.mask_rate
       - training.noise_rate
       - training.noise_scale
@@ -51,6 +53,7 @@ stages:
     deps:
     - pipeline/2.1_self_supervised_training.py
     - data/dataset/metal_site_dataset
+    - data/toy_dataset
     - data/dataset/tokenizer.pkl
     - data/training_avg_num_neighbors.json
     - data/metrics/null_model_metrics.json
@@ -71,6 +74,7 @@ stages:
     - model.imbalance_loss_reweight
     - model.imbalance_loss_temperature
     - training.debug_sample
+    - training.debug_use_toy
     - training.mask_rate
     - training.noise_rate
     - training.noise_scale
