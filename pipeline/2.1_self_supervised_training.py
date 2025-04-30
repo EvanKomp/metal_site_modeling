@@ -144,6 +144,7 @@ def main(quit_early=False, resume_from_checkpoint=None):
         drop_path_rate=params.model.drop_path_rate,
         avg_num_neighbors=get_avg_num_neighbors(),
         label_smoothing_factor=params.model.label_smoothing_factor,
+        model_atom_types=params.model.model_atom_types,
 
         # not available for training
         output_attentions=False,

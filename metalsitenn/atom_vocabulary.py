@@ -51,18 +51,21 @@ class BaseVocabulary:
 
     def encode(self, items: Union[str, List[str]]) -> Union[int, torch.Tensor]:
         """Convert string(s) to token(s)."""
-        try:
-            if isinstance(items, str):
-                return self.stoi[items]
-            
-            # vectorize over list
-            # use multiple cpu if available
-            return torch.tensor([self.stoi[item] for item in items], dtype=torch.long)
-        except KeyError as e:
-            if self.allow_unknown:
-                logger.warning(f"Unknown token: {e}")
-                return self.unk_token
-            raise UnknownTokenError(f"Unknown token: {e}, available are {self.stoi.keys()}")
+
+        if isinstance(items, str):
+            return self.stoi[items]
+        
+        toks = []
+        for item in items:
+            try:
+                toks.append(self.stoi[item])
+            except KeyError:
+                if self.allow_unknown:
+                    toks.append(self.stoi['<UNK>'])
+                else:
+                    raise UnknownTokenError(f"Unknown token: {item}, available are {self.stoi.keys()}")
+        
+        return torch.tensor(toks, dtype=torch.long)
 
     def decode(self, tokens: Union[int, torch.Tensor]) -> Union[str, List[str]]:
         """Convert token(s) to string(s)."""
@@ -249,10 +252,16 @@ class AtomTokenizer:
         Returns:
             Dictionary with keys 'atoms' and 'records' containing tokenized data
         """
-        return {
+        outs = {
             'atoms': [self.atom_vocab.encode(names) for names in atoms],
             'atom_types': [self.record_vocab.encode(types) for types in atom_types]
         }
+        # check that lengths match for each
+        for i in range(len(outs['atoms'])):
+            if len(outs['atoms'][i]) != len(outs['atom_types'][i]):
+                raise ValueError(f"Tokenization created inconsistent lengths: atoms={len(outs['atoms'][i])}, atom_types={len(outs['atom_types'][i])}")
+        
+        return outs
     
     def _decode_atoms(self, atoms: List[int]) -> List[str]:
         """Converts integer tokens back to atom names."""

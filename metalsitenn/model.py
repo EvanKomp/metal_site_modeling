@@ -148,6 +148,7 @@ class MetalSiteNNConfig(PretrainedConfig):
         output_hidden_states: bool = False,
         output_initial_embeddings: bool = False,
         label_smoothing_factor: float = 0.0,
+        model_atom_types: bool = True,
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -173,6 +174,7 @@ class MetalSiteNNConfig(PretrainedConfig):
         self.output_hidden_states = output_hidden_states
         self.output_initial_embeddings = output_initial_embeddings
         self.label_smoothing_factor = label_smoothing_factor
+        self.model_atom_types = model_atom_types
 
     def to_dict(self):
         """Convert config to dict, handling non-serializable objects"""
@@ -454,6 +456,7 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
             proj_drop=config.proj_drop,
             atom_vocab_size=config.atom_vocab_size,
             atom_type_vocab_size=config.atom_type_vocab_size,
+            model_atom_types=config.model_atom_types,
         )
         # calculate weights if provided
 
@@ -585,14 +588,15 @@ class MetalSiteForPretrainingModel(MetalSitePretrainedModel):
                 mask_indices=mask,  # Pass mask indices
                 batch_idx=batch_idx
             )
-            mask_loss += self.compute_mask_loss_types(
-                type_logits=type_logits,
-                atom_type_labels=atom_type_labels,
-                mask_indices=mask,  # Pass mask indices
-                batch_idx=batch_idx
-            )
-            # divide by 2
-            mask_loss = mask_loss / 2
+            if self.config.model_atom_types:
+                mask_loss += self.compute_mask_loss_types(
+                    type_logits=type_logits,
+                    atom_type_labels=atom_type_labels,
+                    mask_indices=mask,  # Pass mask indices
+                    batch_idx=batch_idx
+                )
+                # divide by 2
+                mask_loss = mask_loss / 2
         else:
             logger.debug("No mask loss computed")
 

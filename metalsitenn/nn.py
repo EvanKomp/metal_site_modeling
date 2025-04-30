@@ -724,6 +724,7 @@ class MetalSiteNodeHeadLayer(torch.nn.Module):
         proj_drop: Dropout rate for output projection
         atom_vocab_size: Number of atom types
         atom_type_vocab_size: Number of record types
+        model_atom_types: Whether to use atom types
         
     Returns:
         atom_logits: [num_nodes, atom_vocab_size] Atom type predictions
@@ -737,6 +738,7 @@ class MetalSiteNodeHeadLayer(torch.nn.Module):
         proj_drop: float = 0.0,
         atom_vocab_size: int = 14,
         atom_type_vocab_size: int = 3,
+        model_atom_types: bool = True,
     ):
         super().__init__()
         
@@ -746,8 +748,11 @@ class MetalSiteNodeHeadLayer(torch.nn.Module):
         self.proj_drop = proj_drop
         self.atom_vocab_size = atom_vocab_size
         self.atom_type_vocab_size = atom_type_vocab_size
+        self.model_atom_types = model_atom_types
 
-        self.n_tokens = self.atom_vocab_size + self.atom_type_vocab_size
+        self.n_tokens = self.atom_vocab_size
+        if self.model_atom_types:
+            self.n_tokens += self.atom_type_vocab_size
         self.irreps_output = o3.Irreps(f"{self.n_tokens}x0e+1x1o")
 
         # Layer norm & FFN 
@@ -781,8 +786,11 @@ class MetalSiteNodeHeadLayer(torch.nn.Module):
         
         # Split outputs into logits and coordinates
         atom_logits = outputs[:, :self.atom_vocab_size]
-        type_logits = outputs[:, self.atom_vocab_size:self.n_tokens]
-        assert type_logits.shape[1] == self.atom_type_vocab_size
+        if self.model_atom_types:
+            type_logits = outputs[:, self.atom_vocab_size:self.n_tokens]
+            assert type_logits.shape[1] == self.atom_type_vocab_size
+        else:
+            type_logits = None
         coordinates = outputs[:, self.n_tokens:]
         
         return atom_logits, type_logits, coordinates

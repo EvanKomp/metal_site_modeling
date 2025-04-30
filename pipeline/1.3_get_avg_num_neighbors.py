@@ -35,8 +35,12 @@ def main():
     params = ParamsObj(dvc.api.params_show())
     
     # Load dataset
-    dataset = load_from_disk("data/dataset/metal_site_dataset")
-    train_dataset = dataset["train"]
+    if not params.training.debug_use_toy:
+        dataset = load_from_disk("data/dataset/metal_site_dataset")
+        train_dataset = dataset["train"]
+    else:
+        dataset = load_from_disk("data/toy_dataset")
+        train_dataset = dataset["train"]
 
     total_neighbors = 0
     total_nodes = 0

@@ -57,18 +57,24 @@ stages:
       md5: 073db9a3f1ea26223777c3abbf416dd7.dir
       size: 3291760765
       nfiles: 13
+    - path: data/toy_dataset
+      hash: md5
+      md5: 3477d912e5bc567b74a77975a081b0b1.dir
+      size: 22690905
+      nfiles: 7
     - path: pipeline/1.3_get_avg_num_neighbors.py
       hash: md5
-      md5: 80965d7f67a61a456083685eee554bfe
-      size: 1757
+      md5: a2eaf3d1aa337229613e7f5d144dc299
+      size: 1911
     params:
       params.yaml:
         model.max_radius: 5
+        training.debug_use_toy: true
     outs:
     - path: data/training_avg_num_neighbors.json
       hash: md5
-      md5: 2e0f6cdceda6ccf3427e128194a9de83
-      size: 40
+      md5: c460420ea675e36abedf3530042b6c41
+      size: 41
   1.1_parse_site_data:
     cmd: python pipeline/1.1_parse_site_data.py
     deps:
@@ -104,21 +110,21 @@ stages:
       size: 1192
     - path: data/metrics/null_model_metrics.json
       hash: md5
-      md5: a8333240a5021094ef74b1cac06350c2
-      size: 514
+      md5: 64d77917311f11361edcfd1fbc5ece07
+      size: 489
     - path: data/toy_dataset
       hash: md5
-      md5: e639727923cda1a31d57bb003c8c87be.dir
-      size: 14854821
+      md5: 3477d912e5bc567b74a77975a081b0b1.dir
+      size: 22690905
       nfiles: 7
     - path: data/training_avg_num_neighbors.json
       hash: md5
-      md5: 2e0f6cdceda6ccf3427e128194a9de83
-      size: 40
+      md5: c460420ea675e36abedf3530042b6c41
+      size: 41
     - path: pipeline/2.1_self_supervised_training.py
       hash: md5
-      md5: 158e33dadaa2f4d8cc6a19928c13b5ce
-      size: 8656
+      md5: 8588afa72e4a1f89f40270e16c51098c
+      size: 8712
     params:
       params.yaml:
         embedding.hdbscan_alpha: 1.0
@@ -129,7 +135,7 @@ stages:
         embedding.tsne_learning_rate: auto
         embedding.tsne_n_iter: 1000
         embedding.tsne_perplexity: 30
-        model.alpha_drop: 0.1
+        model.alpha_drop: 0.0
         model.atom_embed_dim: 32
         model.drop_path_rate: 0.0
         model.fc_neurons:
@@ -142,63 +148,64 @@ stages:
         model.l: 2
         model.label_smoothing_factor: 0.1
         model.max_radius: 5
+        model.model_atom_types: false
         model.num_basis: 128
         model.num_heads: 8
         model.num_layers: 18
         model.proj_drop: 0.0
         training.dataloader_num_workers: 1
         training.debug_sample:
-        training.debug_use_toy: false
+        training.debug_use_toy: true
         training.early_stopping_improvement_fraction: 0.001
         training.early_stopping_patience: 5
-        training.eval_steps: 150
+        training.eval_steps: 50
         training.frac_noise_loss: 0.5
-        training.gradient_accumulation_steps: 24
+        training.gradient_accumulation_steps: 25
         training.gradient_clipping: 1.0
         training.learning_rate: 5e-05
         training.load_best_model_at_end: true
-        training.logging_steps: 24
+        training.logging_steps: 5
         training.mask_rate: 0.15
         training.noise_rate: 0.15
         training.noise_scale: 0.7
-        training.num_epochs: 5
+        training.num_epochs: 20
         training.per_device_batch_size: 6
-        training.use_early_stopping: true
+        training.use_early_stopping: false
         training.warmup_pct: 0.1
         training.weight_decay: 0.001
     outs:
     - path: data/model_pretraining/checkpoints
       hash: md5
-      md5: 83f13378fa667cd4679ac05d01ad5bca.dir
-      size: 1472164820
-      nfiles: 45
+      md5: b94e6ef308827a8731cca839f9b0065a.dir
+      size: 41413532552
+      nfiles: 1200
     - path: data/model_pretraining/dvclive/metrics.json
       hash: md5
-      md5: eef9919371fc10c023adae529d892df6
-      size: 518
+      md5: 99f5e74c88de927a014680e582d3fd0b
+      size: 501
     - path: data/model_pretraining/dvclive/plots/custom/eval_2d_space.json
       hash: md5
-      md5: 8a2e7163504fc78c39b682ac9e22ee40
-      size: 155301
+      md5: 88ddbd926f90a9a190def492e8c4872b
+      size: 78594
     - path: data/model_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: 9ffab1081a5cdeaf55041d6a05719b76.dir
-      size: 19950
+      md5: 2d5550e0071b416d66b387984833c1df.dir
+      size: 123143
       nfiles: 11
     - path: data/model_pretraining/eval_2d_space
       hash: md5
-      md5: 98757f4e4919b22631b3fa82c9765b53.dir
-      size: 1775324
-      nfiles: 35
+      md5: a9d019690672f52802b6379b892c1f08.dir
+      size: 3705843
+      nfiles: 151
     - path: data/model_pretraining/final_model
       hash: md5
-      md5: 25c740143b00a5ff85d9f3687eddd8d4.dir
-      size: 98421693
+      md5: 9e549c086281c0bb1ab9bbadc90dd2b7.dir
+      size: 98395587
       nfiles: 2
     - path: data/plots/atom_weights.png
       hash: md5
-      md5: efb56f0dfb86c040e4d11addeff6a026
-      size: 56002
+      md5: 69a6f73c38f25fe5b1d91c211c44dcf8
+      size: 54229
   1.4_compute_null_model:
     cmd: python pipeline/1.4_compute_null_model.py
     deps:
@@ -213,8 +220,8 @@ stages:
       size: 1192
     - path: data/toy_dataset
       hash: md5
-      md5: e639727923cda1a31d57bb003c8c87be.dir
-      size: 14854821
+      md5: 3477d912e5bc567b74a77975a081b0b1.dir
+      size: 22690905
       nfiles: 7
     - path: pipeline/1.4_compute_null_model.py
       hash: md5
@@ -222,12 +229,12 @@ stages:
       size: 3991
     params:
       params.yaml:
-        training.debug_use_toy: false
+        training.debug_use_toy: true
         training.mask_rate: 0.15
         training.noise_rate: 0.15
         training.noise_scale: 0.7
     outs:
     - path: data/metrics/null_model_metrics.json
       hash: md5
-      md5: a8333240a5021094ef74b1cac06350c2
-      size: 514
+      md5: 64d77917311f11361edcfd1fbc5ece07
+      size: 489

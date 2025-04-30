@@ -144,6 +144,9 @@ def compute_atom_mask_accuracy(trainer, outputs, batch):
 
 def compute_atom_type_accuracy(trainer, outputs, batch):
     """Accuracy on poredicting hetatm or atm."""
+    # check if we are even modeling atom types
+    if outputs['outputs'].type_logits is None:
+        return 0.0
     masked_labels = batch['atom_type_labels'][batch['mask']]
     masked_preds = outputs['outputs'].type_logits[batch['mask']].argmax(dim=-1)
 

@@ -5,6 +5,7 @@ data:
   test_frac: 0.05 # Fraction of data to use for testing
 
 model:
+  model_atom_types: false
   l: 2 # Maximum order of irreps to consider within the model
   hidden_scale: 128 # base multiplicity for l=0 irreps, eg. Xe0 + Xo0 + ...
   hidden_scale_decay: 0.25 # Multiplicative decay factor for each additional l, eg. Xe1 = Xe0 * hidden_scale_decay
@@ -15,7 +16,7 @@ model:
   max_neighbors: 30 # Maximum number of neighbors to consider for each atom
   num_basis: 128 # Number of basis functions to use for radial basis functions
   num_layers: 18 # Number of transformer layers
-  alpha_drop: 0.1 # Dropout rate for aattention heads
+  alpha_drop: 0.0 # Dropout rate for aattention heads
   proj_drop: 0.0 # Dropout rate for projection layers
   drop_path_rate: 0.0 # Drop path rate for stochastic depth
   label_smoothing_factor: 0.1 # Label smoothing factor for cross entropy loss
@@ -24,25 +25,25 @@ model:
 
 training:
   debug_sample: null # Number of samples to use for debugging
-  debug_use_toy: false # Use toy dataset for debugging
+  debug_use_toy: true # Use toy dataset for debugging
   mask_rate: 0.15 # Fraction of atoms to mask during training
   noise_rate: 0.15 # Fraction of coordinates to noise during training
   noise_scale: .7 # Standard deviation of noise to apply to coordinates - Units of Angstrom.
 
-  eval_steps: 150 # Number of steps to evaluate model on validation set (and save a checkpoint)
-  logging_steps: 24 # Number of steps to log training metrics
+  eval_steps: 50 # Number of steps to evaluate model on validation set (and save a checkpoint)
+  logging_steps: 5 # Number of steps to log training metrics
   load_best_model_at_end: true # Load the best model at the end of training
 
-  num_epochs: 5 # Number of epochs to train for
+  num_epochs: 20 # Number of epochs to train for
   per_device_batch_size: 6 # Number of MFS systems per batch
-  gradient_accumulation_steps: 24 # Number of steps to accumulate gradients over
+  gradient_accumulation_steps: 25 # Number of steps to accumulate gradients over
   dataloader_num_workers: 1 # Number of workers to use for data loading
   learning_rate: 5e-5 # Learning rate for Adam optimizer
   weight_decay: 1e-3 # Weight decay for Adam optimizer
   gradient_clipping: 1.0 # Gradient clipping value
   frac_noise_loss: 0.5 # Fraction of loss to delegate to noise loss
   warmup_pct: .1 # Number of steps to linearly increase learning rate for
-  use_early_stopping: true # Use early stopping based on validation loss
+  use_early_stopping: false # Use early stopping based on validation loss
   early_stopping_patience: 5 # Number of steps to wait before stopping training
   early_stopping_improvement_fraction: 0.001 # Minimum improvement in validation loss to continue training
 

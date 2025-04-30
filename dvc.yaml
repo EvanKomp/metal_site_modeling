@@ -27,9 +27,11 @@ stages:
     cmd: python pipeline/1.3_get_avg_num_neighbors.py
     params:
     - model.max_radius
+    - training.debug_use_toy
     deps:
     - pipeline/1.3_get_avg_num_neighbors.py
     - data/dataset/metal_site_dataset
+    - data/toy_dataset
     metrics:
     - data/training_avg_num_neighbors.json
 
@@ -58,6 +60,7 @@ stages:
     - data/training_avg_num_neighbors.json
     - data/metrics/null_model_metrics.json
     params:
+    - model.model_atom_types
     - model.l
     - model.hidden_scale
     - model.hidden_scale_decay
