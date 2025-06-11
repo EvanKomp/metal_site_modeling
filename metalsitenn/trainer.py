@@ -58,7 +58,7 @@ def COMPUTE_LOSS_SELF_SUPERVISED_TRAINING(
 """Metrics used during evaluation that require additional computation."""
 def NO_MASKING_EMBED_AND_CLUSTER(
         trainer: "MetalSiteTrainer",
-        embedding_how: str = "<METAL>_mean",
+        embedding_how: str = "all_mean",
         hidden_state: int = -1,
         cluster_kwargs: Dict[str, Any] = {},
         tsne_kwargs: Dict[str, Any] = {}
@@ -163,7 +163,7 @@ def compute_metal_accuracy(trainer, outputs, batch):
     # get the predictions for only masked tokens that are metals
     metal_mask = masked_labels == metal_token
     if sum(metal_mask) == 0:
-        return None
+        return 0.0
     return (masked_labels[metal_mask] == masked_preds[metal_mask]).float().mean().item()
 
 COMPUTE_EVAL_METRICS_FOUNDATIONAL_TRAINING = {
@@ -311,21 +311,28 @@ class MetalSiteTrainer:
         if self.early_stopping:
             self.accelerator.register_for_checkpointing(self.early_stopping)
 
-        # Create dataloaders
+        # Create dataloaders BEFORE accelerator.prepare()
         self.train_dataloader = self._get_train_dataloader() if train_dataset else None
         self.eval_dataloader = self._get_eval_dataloader() if eval_dataset else None
 
-        # Set up optimizer and scheduler   
+        # Calculate training schedule BEFORE prepare() using original dataloader length
+        self.batches_per_epoch = len(self.train_dataloader)  # Raw batches per epoch (no accumulation, no multi-device)
+        self.updates_per_epoch = self.batches_per_epoch // args.gradient_accumulation_steps  # Optimizer updates per epoch (single device)
+        
+        # Set up optimizer
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=args.learning_rate,
             weight_decay=args.weight_decay
         )
+
+        # Create scheduler BEFORE prepare() using single-device update counts
+        # Accelerate will handle multi-device scaling internally
         self.scheduler = OneCycleLR(
             self.optimizer,
             max_lr=args.learning_rate,
             epochs=args.num_epochs,
-            steps_per_epoch=len(self.train_dataloader),
+            steps_per_epoch=self.updates_per_epoch,  # Single device updates
             pct_start=args.warmup_pct
         )
 
@@ -339,12 +346,24 @@ class MetalSiteTrainer:
         )
         self.model, self.optimizer, self.train_dataloader, self.eval_dataloader, self.scheduler = prepared
 
-        self.n_warmup_steps = args.warmup_pct * args.num_epochs * len(self.train_dataloader)
+        # Calculate actual training metrics AFTER prepare() for logging
+        self.steps_per_epoch = len(self.train_dataloader)  # Forward passes per epoch (considers multi-device)
+        self.total_steps = args.num_epochs * self.steps_per_epoch  # Total forward passes
+        self.updates_per_epoch_actual = self.steps_per_epoch // args.gradient_accumulation_steps  # Actual updates per epoch
+        self.total_updates = args.num_epochs * self.updates_per_epoch_actual  # Total optimizer updates
+        self.n_warmup_updates = int(args.warmup_pct * self.total_updates)  # Warmup in terms of updates
+
+        # Validate eval_steps alignment with gradient accumulation
+        if args.eval_steps is not None and args.eval_steps % args.gradient_accumulation_steps != 0:
+            raise ValueError(
+                f"eval_steps ({args.eval_steps}) must be divisible by gradient_accumulation_steps "
+                f"({args.gradient_accumulation_steps}) to ensure evaluation occurs on update boundaries"
+            )
 
         # hard eval metrics
         self.hard_eval_metrics = hard_eval_metrics or {}
 
-        # create checkpointomg folder if not present
+        # create checkpointing folder if not present
         if not os.path.exists(os.path.join(args.output_dir, "checkpoints")):
             os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
 
@@ -469,21 +488,32 @@ class MetalSiteTrainer:
         return avg_loss.item()
 
     def train(self, resume_from_checkpoint: Optional[str] = None):
+        """Train the model."""
         # get memory used on this gpu
         mem = torch.cuda.memory_allocated() / 1e9
         logger.info(f"Memory used on GPU: {mem} GB")
         
-        # Add global step tracking
+        # Initialize global step tracking (forward passes)
         self.global_step = 0
+        self.global_update = 0  # Track optimizer updates separately
+        start_epoch = 0
+        
         if resume_from_checkpoint:
-            # Assuming checkpoint contains global step
+            # Extract step from checkpoint name and calculate positions
             self.global_step = int(resume_from_checkpoint.split('_')[-1])
-            steps_per_epoch = len(self.train_dataloader)
-            steps_to_skip = self.global_step % steps_per_epoch
+            self.global_update = self.global_step // self.args.gradient_accumulation_steps
+            start_epoch = self.global_update // self.updates_per_epoch_actual
+            steps_to_skip = self.global_step % self.steps_per_epoch
+            
             self.accelerator.load_state(resume_from_checkpoint)
-            self.train_dataloader = self.accelerator.skip_first_batches(self.train_dataloader, steps_to_skip)
-            logger.info(f"Resumed from checkpoint: {resume_from_checkpoint}")
-
+            
+            # Skip batches if resuming mid-epoch
+            if steps_to_skip > 0:
+                self.train_dataloader = self.accelerator.skip_first_batches(
+                    self.train_dataloader, steps_to_skip
+                )
+            
+            logger.info(f"Resumed from checkpoint: {resume_from_checkpoint} at step {self.global_step}, update {self.global_update}")
 
         logger.info(
             f"Training with {self.accelerator.num_processes} processes on {self.accelerator.device.type}\n"
@@ -491,13 +521,14 @@ class MetalSiteTrainer:
             f" - examples in dataset: {len(self.train_dataset)}\n"
             f" - per device batch size: {self.args.per_device_train_batch_size}\n"
             f" - gradient accumulation steps: {self.args.gradient_accumulation_steps}\n"
-
             f" - effective batch size: {self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps * self.accelerator.num_processes}\n"
             f" - total epochs: {self.args.num_epochs}\n"
-            f" - steps per epoch: {len(self.train_dataloader)}\n"
-            f" - total steps: {self.args.num_epochs * len(self.train_dataloader)}\n"
-            f" - param updates per epoch: {len(self.train_dataloader) // self.args.gradient_accumulation_steps}\n"
-            f" - warmup steps: {self.n_warmup_steps}\n"
+            f" - batches per epoch (raw): {self.batches_per_epoch}\n"
+            f" - steps per epoch (forward passes): {self.steps_per_epoch}\n"
+            f" - updates per epoch (optimizer steps): {self.updates_per_epoch_actual}\n"
+            f" - total steps (forward passes): {self.total_steps}\n"
+            f" - total updates (optimizer steps): {self.total_updates}\n"
+            f" - warmup updates: {self.n_warmup_updates}\n"
             f" - log training loss every {self.args.logging_steps} steps\n"
             f" - eval and checkpoint every {self.args.eval_steps} steps\n"
             f" - total trainable parameters: {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}"
@@ -508,13 +539,16 @@ class MetalSiteTrainer:
             self.evaluate()
         
         # Training loop
-        for epoch in range(self.args.num_epochs):
+        for epoch in range(start_epoch, self.args.num_epochs):
             self.model.train()
             total_loss = 0
+            loss_accumulation_count = 0
             
             progress_bar = tqdm(
                 self.train_dataloader,
-                disable=not self.accelerator.is_local_main_process
+                desc=f"Epoch {epoch}",
+                disable=not self.accelerator.is_local_main_process,
+                total=len(self.train_dataloader)
             )
 
             for batch in progress_bar:
@@ -526,6 +560,7 @@ class MetalSiteTrainer:
                     self.accelerator.backward(loss)
                     
                     if self.accelerator.sync_gradients:
+                        # This happens every gradient_accumulation_steps batches
                         self.accelerator.clip_grad_norm_(
                             self.model.parameters(),
                             self.args.gradient_clipping
@@ -533,28 +568,38 @@ class MetalSiteTrainer:
                         self.optimizer.step()
                         self.optimizer.zero_grad()
                         self.scheduler.step()
+                        
+                        # Increment update counter on optimizer updates
+                        self.global_update += 1
 
                         if self.quit_early:
                             logger.info("Quitting early")
                             return
 
-                    total_loss += loss.detach().float()
+                    # Always increment step counter on forward passes
+                    self.global_step += 1
 
-                # Increment global step
-                self.global_step += 1
+                    # Accumulate loss for logging
+                    total_loss += loss.detach().float()
+                    loss_accumulation_count += 1
 
                 # Log training metrics
-                if self.global_step > 0 and self.global_step % self.args.logging_steps == 0:
-                    avg_loss = total_loss / self.args.logging_steps
+                if (
+                    self.global_step > 0 
+                    and self.global_step % self.args.logging_steps == 0
+                ):
+                    avg_loss = total_loss / loss_accumulation_count
                     self.accelerator.log({
                         "train/loss": avg_loss.item(),
                         "train/epoch": epoch,
                         "train/global_step": self.global_step,
+                        "train/global_update": self.global_update,
                         "train/learning_rate": self.optimizer.param_groups[0]["lr"]
                     }, step=self.global_step)
                     total_loss = 0
+                    loss_accumulation_count = 0
 
-                # Evaluate and checkpoint if needed
+                # Evaluate and checkpoint if needed (only on update boundaries)
                 if (
                     self.args.eval_steps 
                     and self.global_step > 0 
@@ -585,16 +630,15 @@ class MetalSiteTrainer:
                         )
                         if (should_stop and 
                             self.early_stopping.counter >= self.args.early_stopping_patience):
-                            if self.global_step > self.n_warmup_steps:
+                            if self.global_update > self.n_warmup_updates:
                                 logger.info("Early stopping triggered")
                                 self._finish_up()
                                 return
-                        
 
         self._finish_up()
 
-
     def _finish_up(self):
+        """Save final checkpoint and load best model if requested."""
         output_dir = os.path.join(
             self.args.output_dir,
             "checkpoints",

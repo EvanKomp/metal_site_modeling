@@ -34,8 +34,8 @@ training:
   logging_steps: 5 # Number of steps to log training metrics
   load_best_model_at_end: true # Load the best model at the end of training
 
-  num_epochs: 20 # Number of epochs to train for
-  per_device_batch_size: 6 # Number of MFS systems per batch
+  num_epochs: 500 # Number of epochs to train for
+  per_device_batch_size: 12 # Number of MFS systems per batch
   gradient_accumulation_steps: 25 # Number of steps to accumulate gradients over
   dataloader_num_workers: 1 # Number of workers to use for data loading
   learning_rate: 5e-5 # Learning rate for Adam optimizer
@@ -48,7 +48,7 @@ training:
   early_stopping_improvement_fraction: 0.001 # Minimum improvement in validation loss to continue training
 
 embedding:
-  how: "<METAL>_mean"
+  how: "all_mean"
   hidden_state: -1
   hdbscan_min_cluster_size: 5
   hdbscan_min_samples: 5

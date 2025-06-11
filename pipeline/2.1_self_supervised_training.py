@@ -67,6 +67,16 @@ def get_atom_weights(tokenizer: AtomTokenizer, params: ParamsObj):
         temperature = 0.0
 
     cutoff_token = '<METAL>' if not params.data.metal_known else 'CU'
+    if cutoff_token not in null_model_metrics:
+        # find token with minimum frequency
+        min_tok = None
+        for key, value in null_model_metrics.items():
+            if len(key) > 1 and not startswith(key, '<'):
+                continue
+            elif min_tok is None or value < null_model_metrics[min_tok]:
+                min_tok = key
+        cutoff_token = min_tok
+        logger.info(f"Cutoff token: {cutoff_token}")
     atom_weights, freq_dict = tokenizer.get_token_weights(freq_dict=null_model_metrics, temperature=temperature, cutoff_token=cutoff_token)
 
     logger.info(f"Atom weights: {freq_dict}")

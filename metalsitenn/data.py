@@ -19,6 +19,7 @@ from metalsitenn.atom_vocabulary import AtomTokenizer
 
 import logging
 logger = logging.getLogger(__name__)
+from metalsitenn.constants import METAL_IONS
 
 
 
@@ -32,22 +33,31 @@ class PDBReader:
     - Record types (ATOM/HETATM)
     """
     
-    def __init__(self, deprotonate: bool = False, skip_only_hetatm: bool = True):
+    def __init__(self, deprotonate: bool = False, skip_only_hetatm: bool = True, skip_any_hetatm: bool = False):
+        """Initialize PDB reader.
+        
+        Args:
+            deprotonate: Remove hydrogen atoms from structures
+            skip_only_hetatm: Skip structures containing only HETATM records
+            skip_any_hetatm: Skip structures containing any HETATM records (except metals)
+        """
         self.parser = PandasPdb()
         self.deprotonate = deprotonate
         self.skip_only_hetatm = skip_only_hetatm
+        self.skip_any_hetatm = skip_any_hetatm
         
-    def read(self, pdb_path: str) -> Tuple[np.ndarray, List[str], List[str], List[str]]:
+    def read(self, pdb_path: str) -> Dict[str, Any]:
         """Read PDB file and extract atomic information.
         
         Args:
             pdb_path: Path to PDB file
             
         Returns:
-            pos: [N,3] array of atomic coordinates
-            atom_names: List of full atom names (e.g. 'CA', 'CB')
-            atoms: List of base elements (e.g. 'C', 'N')
-            atom_types: List of ATOM/HETATM record types
+            Dict containing:
+                pos: [N,3] array of atomic coordinates
+                atom_names: List of full atom names (e.g. 'CA', 'CB')
+                atoms: List of base elements (e.g. 'C', 'N')
+                atom_types: List of ATOM/HETATM record types
         """
         try:
             structure = self.parser.read_pdb(pdb_path)
@@ -71,17 +81,52 @@ class PDBReader:
             'atom_types': record_types
         }
     
-    def read_dir(self, pdb_dir: str) -> Tuple[np.ndarray, List[str], List[str], List[str]]:
-        """Read all PDB files in a directory as an iterator"""
-
+    def _should_skip_structure(self, atom_types: List[str], atoms: List[str]) -> bool:
+        """Determine if structure should be skipped based on filtering criteria.
+        
+        Args:
+            atom_types: List of ATOM/HETATM record types
+            atoms: List of atomic symbols
+            
+        Returns:
+            True if structure should be skipped
+        """
+        # Skip if only HETATMs
+        if self.skip_only_hetatm and all(x == 'HETATM' for x in atom_types):
+            return True
+            
+        # Skip if any non-metal HETATMs present
+        if self.skip_any_hetatm:
+            has_non_metal_hetatm = any(
+                record_type == 'HETATM' and atom not in METAL_IONS 
+                for record_type, atom in zip(atom_types, atoms)
+            )
+            if has_non_metal_hetatm:
+                return True
+                
+        return False
+    
+    def read_dir(self, pdb_dir: str) -> Iterator[Dict[str, Any]]:
+        """Read all PDB files in a directory as an iterator.
+        
+        Args:
+            pdb_dir: Directory containing PDB files
+            
+        Yields:
+            Dict containing atomic data for each valid structure
+        """
         for file in os.listdir(pdb_dir):
             if file.endswith(".pdb"):
                 outs = self.read(os.path.join(pdb_dir, file))
                 if outs is None:
                     continue
+                    
                 outs['id'] = file.split('.')[0]
-                if self.skip_only_hetatm and all([x == 'HETATM' for x in outs['atom_types']]):
+                
+                # Apply filtering criteria
+                if self._should_skip_structure(outs['atom_types'], outs['atoms']):
                     continue
+                    
                 yield outs
 
 
