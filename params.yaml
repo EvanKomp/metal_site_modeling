@@ -1,18 +1,28 @@
 data:
   # data source
   source: "/datasets/alphafold_data/data_v2/pdb_mmcif/mmcif_files" # Source of data, e.g. "mfs", "cif", "pdb"
+  debug_max_files: 50 # Maximum number of sites to use for debugging
 
   # related to tokenization
   metal_known: false # Use unique tokens for metals vs generic METAL token
   aggregate_uncommon: true # Aggregate uncommon atom types into a single token
 
   # parsing metal binding sites
-  skip_entities: []
-  metal_aggregation_distance: 10 # Distance in Angstroms to aggregate metals into a single site
-  metal_site_radius: 5 # Radius in Angstroms from metal to include entities in metal binding site
-  max_atoms_per_sit: 60 # Maximum number of heavy atoms to consider in a system
+  remove_entities: ['SO4', 'PO4', 'CL', 'BR', 'I', 'NO3', 'ACT', 'FMT', 'TRS', 'BIC', 'TRA', 'MES', 'BIS', 'EPE', 'IMD', 'GOL', 'ETG', 'PEG', 'PG4', 'PGE', 'MPD', 'DMS', 'SUC', 'TRE', 'XYL', 'ERY', 'ACE', 'EOH', 'MOH', 'IPA', 'BUT', 'DMF', 'DMSO', 'LDA', 'OP1', 'C8E', 'DDM', 'BOG', 'LMT', 'IOD', 'XE', 'KR', 'BCB', 'BTB', 'CR', 'MB', 'UNX', 'UNL', 'UNK', 'DUM', 'AMS', 'LIS', 'CAS', 'MPO', 'NEP', 'PEN', 'HEX']
+  skip_sites_with_entities: 'non_metal' # list of entitiy names or 'non_metal', in which case if a site contains an antity that does not have a metal, it is skipped (other than water)
+  backbone_treatment: free # one of 'ca_only', 'free', 'bound'. For ca_only, Cb , O, N are removed. for free, just the bond is broken. For bound, the bond and all atoms are kept.
+  metal_aggregation_distance: 6 # Distance in Angstroms to aggregate metals into a single site
+  metal_site_radius: 6 # Radius in Angstroms from metal to include entities in metal binding site
+  max_atoms_per_site: 400 # Maximum number of heavy atoms to consider in a system
+  min_residues_per_site: 2 # Minimum number of residues to consider a site valid
+  max_water_bfactor: 18
+  n_cores: 1
+  save_pdbs: true
   
   test_frac: 0.05 # Fraction of data to use for testing
+
+training:
+  fix_ca: true # may need to be moved - whether or not CA are fixed in diffussion, also controls whether noise is applied to its position.
 
 # model:
 #   model_atom_types: false
