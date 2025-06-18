@@ -12,6 +12,10 @@ from metalsitenn.constants import I2E
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
+import torch
+
+from metalsitenn.tokenizers import TOKENIZERS
+from metalsitenn.constants import ALL_METALS
 
 
 @dataclass
@@ -304,6 +308,181 @@ def visualize_metal_site_3d(site_data: Dict,
                     'center': {'x': atom.xyz[0], 'y': atom.xyz[1], 'z': atom.xyz[2]},
                     'radius': metal_size,
                     'color': metal_color,
+                    'alpha': 0.8
+                })
+    
+    viewer.zoomTo()
+    return viewer
+
+def visualize_featurized_metal_site_3d(
+    atom_features_dict: Dict[str, torch.Tensor],
+    bond_features_dict: Dict[str, torch.Tensor],
+    width: int = 800,
+    height: int = 600,
+    highlight_metals: bool = True,
+    metal_color: str = 'red',
+    metal_size: float = 0.5,
+    mask_color: str = 'grey',
+    mask_size: float = 0.3,
+    background_color: str = 'white',
+    show_labels: bool = False,
+    stick_radius: float = 0.1,
+    sphere_radius: float = 0.3
+) -> py3Dmol.view:
+    """
+    Visualize a featurized metal binding site in 3D using py3Dmol.
+    
+    Args:
+        atom_features_dict: Dictionary of atom features from MetalSiteFeaturizer
+        bond_features_dict: Dictionary of bond features from MetalSiteFeaturizer  
+        width: Width of the viewer in pixels
+        height: Height of the viewer in pixels
+        highlight_metals: Whether to highlight metal atoms differently
+        metal_color: Color for metal atoms
+        metal_size: Size multiplier for metal atoms
+        mask_color: Color for masked atoms
+        mask_size: Size multiplier for masked atoms
+        background_color: Background color of the viewer
+        show_labels: Whether to show atom labels
+        stick_radius: Radius for stick bonds
+        sphere_radius: Radius for atom spheres
+        
+    Returns:
+        py3Dmol viewer object ready for display
+        
+    Raises:
+        ValueError: If required features are missing from input dictionaries
+    """
+    # Validate required features
+    required_atom_features = ['positions', 'element']
+    missing_features = [f for f in required_atom_features if f not in atom_features_dict]
+    if missing_features:
+        raise ValueError(f"Missing required atom features: {missing_features}")
+    
+    # Get basic data
+    positions = atom_features_dict['positions']  # (N_atoms, 3)
+    element_tokens = atom_features_dict['element'].squeeze(-1)  # (N_atoms,)
+    n_atoms = len(positions)
+    
+    # Get tokenizers
+    element_tokenizer = TOKENIZERS['element']
+    
+    # Decode elements from tokens
+    elements = []
+    is_masked = []
+    for token in element_tokens:
+        token_item = token.item()
+        try:
+            element = element_tokenizer.decode(token_item)
+            if element == '<MASK>':
+                elements.append('X')  # Use 'X' for unknown elements in visualization
+                is_masked.append(True)
+            elif element == '<UNK>':
+                elements.append('X')
+                is_masked.append(True)
+            elif element == '<METAL>':
+                elements.append('Fe')  # Use Fe as generic metal representation
+                is_masked.append(False)
+            else:
+                elements.append(element)
+                is_masked.append(False)
+        except KeyError:
+            elements.append('X')
+            is_masked.append(True)
+    
+    # Create viewer
+    viewer = py3Dmol.view(width=width, height=height)
+    viewer.setBackgroundColor(background_color)
+    
+    # Add atoms as spheres
+    for i in range(n_atoms):
+        pos = positions[i].numpy()
+        element = elements[i]
+        masked = is_masked[i]
+        
+        # Determine color and size
+        if masked:
+            color = mask_color
+            radius = mask_size
+        elif highlight_metals and (element in ALL_METALS or element == 'Fe'):
+            color = metal_color
+            radius = metal_size
+        else:
+            # Use CPK colors for common elements
+            cpk_colors = {
+                'H': 'white', 'C': 'gray', 'N': 'blue', 'O': 'red', 'S': 'yellow',
+                'P': 'orange', 'F': 'green', 'Cl': 'green', 'Br': 'darkred',
+                'I': 'purple', 'Fe': 'orange', 'Zn': 'gray', 'Ca': 'green',
+                'Mg': 'darkgreen', 'Na': 'blue', 'K': 'violet', 'Cu': 'brown',
+                'Mn': 'violet', 'Co': 'pink', 'Ni': 'lightgreen'
+            }
+            color = cpk_colors.get(element, 'gray')
+            radius = sphere_radius
+            
+        viewer.addSphere({
+            'center': {'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2])},
+            'radius': radius,
+            'color': color,
+            'alpha': 0.8
+        })
+        
+        # Add labels if requested
+        if show_labels:
+            label_text = f"{element}{i}" if not masked else f"MASK{i}"
+            viewer.addLabel(label_text, {
+                'position': {'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2])},
+                'backgroundColor': 'white',
+                'fontColor': 'black',
+                'fontSize': 10
+            })
+    
+    # Add bonds if bond features are available
+    if 'bond_order' in bond_features_dict:
+        bond_order_matrix = bond_features_dict['bond_order']  # (N_atoms, N_atoms)
+        bond_tokenizer = TOKENIZERS['bond_order']
+        
+        # Get non-bonded token ID for comparison
+        non_bonded_id = bond_tokenizer.non_bonded_token_id
+        mask_token_id = bond_tokenizer.mask_token_id if hasattr(bond_tokenizer, 'mask_token_id') else None
+        
+        # Find all bonds (upper triangle to avoid duplicates)
+        for i in range(n_atoms):
+            for j in range(i + 1, n_atoms):
+                bond_token = bond_order_matrix[i, j].item()
+                
+                # Skip non-bonds and masked bonds
+                if bond_token == non_bonded_id:
+                    continue
+                if mask_token_id is not None and bond_token == mask_token_id:
+                    continue
+                if is_masked[i] or is_masked[j]:
+                    continue
+                    
+                # Decode bond order
+                try:
+                    bond_order = bond_tokenizer.decode(bond_token)
+                except KeyError:
+                    continue
+                    
+                # Determine bond style based on order
+                if bond_order == 1:
+                    bond_radius = stick_radius
+                elif bond_order == 2:
+                    bond_radius = stick_radius * 1.2
+                elif bond_order == 3:
+                    bond_radius = stick_radius * 1.4
+                else:
+                    bond_radius = stick_radius
+                    
+                # Add bond as cylinder
+                pos_i = positions[i].numpy()
+                pos_j = positions[j].numpy()
+                
+                viewer.addCylinder({
+                    'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
+                    'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
+                    'radius': bond_radius,
+                    'color': 'gray',
                     'alpha': 0.8
                 })
     

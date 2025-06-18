@@ -7,6 +7,7 @@
 '''
 from typing import Union, List, Dict, Optional, Any
 import warnings
+import numpy as np
 
 from metalsitenn.constants import COMMON_PROTEIN_ATOMS, ALL_METALS, BIOLOGICAL_METALS, PROTEIN_METALS, CRITICAL_METALS
 
@@ -573,29 +574,6 @@ class HybdridizaitonTokenizer(Tokenizer):
         super().__init__(hybridization_vocab, error_on_unknown=True, use_mask=True)
 
 
-class IsBondedTokenizer(Tokenizer):
-
-    def __init__(self):
-        """
-        Initialize IsBondedTokenizer with boolean bonded status and <MASK> token.
-        
-        The vocabulary includes:
-        - False (not bonded)
-        - True (bonded)
-        - Special token: <MASK>
-        Total vocabulary size: 3
-        """
-        # Create vocabulary of bonded status
-        bonded_vocab = [False, True]
-        
-        # Initialize parent tokenizer with error_on_unknown=True and use_mask=True
-        super().__init__(bonded_vocab, error_on_unknown=True, use_mask=False)
-
-    @property
-    def non_bonded_token_id(self) -> int:
-        """Index of the False (not bonded) token."""
-        return self.d2i[False]
-
 class BondOrderTokenizer(Tokenizer):
     """
     Specialized tokenizer for bond orders commonly found in molecular systems.
@@ -740,17 +718,16 @@ class BondDistanceTokenizer(Tokenizer):
     def non_bonded_token_id(self) -> int:
         """Index of the 0 (non-bonded) token."""
         return self.d2i[0]
-    
+
 
 TOKENIZERS = {
     'element': ElementTokenizer(),
     'charge': ChargeTokenizer(),
     'nhyd': HydrogenCountTokenizer(),
     'hyb': HybdridizaitonTokenizer(),
-    'is_bonded': IsBondedTokenizer(),
     'bond_order': BondOrderTokenizer(),
     'is_aromatic': AromaticTokenizer(),
     'is_in_ring': RingTokenizer(),
-    'bond_distance': BondDistanceTokenizer()
+    'bond_distance': BondDistanceTokenizer(),
 }
     
