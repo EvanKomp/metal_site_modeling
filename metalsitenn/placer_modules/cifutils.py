@@ -1671,6 +1671,319 @@ class CIFParser:
         
         return filtered_atoms, filtered_bonds
 
+    def get_standard_amino_acids(self) -> Dict[str, Residue]:
+        """
+        Get a dictionary of all standard amino acid residues with proper geometry.
+        Uses the existing molecular library to create Residue objects with zero coordinates.
+        
+        Returns:
+            Dict[str, Residue]: Dictionary mapping 3-letter codes to Residue objects
+        """
+        from metalsitenn.constants import RESNAME_3LETTER
+        import copy
+        
+        standard_residues = {}
+        
+        for aa_code in RESNAME_3LETTER:
+            res_data = self.getRes(aa_code)
+            if res_data is not None and 'res' in res_data:
+                # Get the residue and make a deep copy
+                residue = copy.deepcopy(res_data['res'])
+                
+                # Set all coordinates to zero as requested
+                for atom_name, atom in residue.atoms.items():
+                    residue.atoms[atom_name] = atom._replace(xyz=[0.0, 0.0, 0.0])
+                
+                standard_residues[aa_code] = residue
+        
+        return standard_residues
 
 
+# module level
+def get_standard_amino_acids() -> Dict[str, Residue]:
+    """
+    Get a dictionary of all standard amino acid residues with proper geometry.
+    Uses the existing molecular library to create Residue objects with zero coordinates.
+    
+    Returns:
+        Dict[str, Residue]: Dictionary mapping 3-letter codes to Residue objects
+    """
+    parser = CIFParser()
+    standard_residues = parser.get_standard_amino_acids()
+    return standard_residues
 
+RESIDUES_TEMPLATES = get_standard_amino_acids()
+
+def mutate_chain(chain: Chain, target_res_num: str, target_res_name: str, new_res_name: str) -> Chain:
+    """
+    Mutate a residue in a chain to a new amino acid residue type.
+    
+    Replaces the target residue with a new amino acid from RESIDUES_TEMPLATES,
+    positioning all new atoms at the original CA position.
+    
+    Args:
+        chain: Chain object to mutate
+        target_res_num: Residue number (as string) to mutate
+        target_res_name: Current residue name (3-letter code) to verify target
+        new_res_name: New amino acid residue name (3-letter code)
+        
+    Returns:
+        New Chain object with the mutation applied
+        
+    Raises:
+        ValueError: If target residue not found, new residue not in templates, 
+                   or target CA atom not found
+    """
+    # Validate inputs
+    if new_res_name not in RESIDUES_TEMPLATES:
+        raise ValueError(f"New residue type '{new_res_name}' not found in amino acid templates")
+    
+    # Find target residue and get CA position
+    target_ca_pos = None
+    target_res_key = None
+    
+    for res_key in chain.residues:
+        if res_key == target_res_num:
+            residue = chain.residues[res_key]
+            if residue and residue.name == target_res_name:
+                target_res_key = res_key
+                # Find CA atom in this residue
+                for atom_key, atom in chain.atoms.items():
+                    if (atom_key[0] == chain.id and 
+                        atom_key[1] == target_res_num and 
+                        atom_key[2] == target_res_name and 
+                        atom_key[3] == 'CA'):
+                        target_ca_pos = atom.xyz
+                        break
+                break
+    
+    if target_res_key is None:
+        raise ValueError(f"Target residue {target_res_num}:{target_res_name} not found in chain")
+    
+    if target_ca_pos is None:
+        raise ValueError(f"CA atom not found for target residue {target_res_num}:{target_res_name}")
+    
+    # Get new residue template
+    new_residue_template = copy.deepcopy(RESIDUES_TEMPLATES[new_res_name])
+    
+    # Create new chain components
+    new_residues = {}
+    new_atoms = {}
+    new_bonds = []
+    new_chirals = []
+    new_planars = []
+    new_automorphisms = []
+    
+    # Copy all residues except the target
+    for res_key, residue in chain.residues.items():
+        if res_key != target_res_key:
+            new_residues[res_key] = copy.deepcopy(residue)
+    
+    # Copy all atoms except those from target residue
+    for atom_key, atom in chain.atoms.items():
+        if not (atom_key[0] == chain.id and 
+                atom_key[1] == target_res_num and 
+                atom_key[2] == target_res_name):
+            new_atoms[atom_key] = atom
+    
+    # Add new atoms from template positioned at CA location (heavy atoms only)
+    new_residue_atoms = {}
+    for atom_name, template_atom in new_residue_template.atoms.items():
+        # Skip hydrogen atoms (element 1 is hydrogen)
+        if template_atom.element == 1:
+            continue
+            
+        new_atom_key = (chain.id, target_res_num, new_res_name, atom_name)
+        new_atom = template_atom._replace(
+            name=new_atom_key,
+            xyz=target_ca_pos,  # Position all atoms at original CA position
+            hetero=False  # Amino acids are not hetero atoms
+        )
+        new_atoms[new_atom_key] = new_atom
+        new_residue_atoms[atom_name] = new_atom
+    
+    # Create updated residue object with heavy atoms only and updated atom keys
+    new_residues[target_res_key] = new_residue_template._replace(
+        name=new_res_name,
+        atoms=new_residue_atoms
+    )
+    
+    # Update bonds - remove old bonds involving target residue, add new ones
+    old_to_new_atom_keys = {}  # For tracking inter-residue bonds
+    
+    # Map old target residue atom keys to new ones for inter-residue bond updating (heavy atoms only)
+    for atom_name, template_atom in new_residue_template.atoms.items():
+        # Skip hydrogens
+        if template_atom.element == 1:
+            continue
+            
+        old_key = (chain.id, target_res_num, target_res_name, atom_name)
+        new_key = (chain.id, target_res_num, new_res_name, atom_name)
+        if atom_name in new_residue_atoms:  # Only if atom exists in new residue (heavy atoms)
+            old_to_new_atom_keys[old_key] = new_key
+    
+    # Copy bonds that don't involve the target residue
+    for bond in chain.bonds:
+        old_res_a = (bond.a[0], bond.a[1], bond.a[2])  # chain, res_num, res_name
+        old_res_b = (bond.b[0], bond.b[1], bond.b[2])
+        target_res = (chain.id, target_res_num, target_res_name)
+        
+        if old_res_a == target_res or old_res_b == target_res:
+            # This is a bond involving the target residue
+            if not bond.intra:
+                # Inter-residue bond - try to preserve if atoms exist in new residue
+                new_a = old_to_new_atom_keys.get(bond.a, bond.a)
+                new_b = old_to_new_atom_keys.get(bond.b, bond.b)
+                
+                # Only add bond if both atoms exist in the new structure
+                if new_a in new_atoms and new_b in new_atoms:
+                    new_bond = bond._replace(a=new_a, b=new_b)
+                    new_bonds.append(new_bond)
+            # Skip intra-residue bonds from old residue - they'll be replaced
+        else:
+            # Bond doesn't involve target residue, keep as is
+            new_bonds.append(bond)
+    
+    # Add intra-residue bonds from new residue template (heavy atoms only)
+    for template_bond in new_residue_template.bonds:
+        # Skip bonds involving hydrogen atoms
+        atom_a = new_residue_template.atoms.get(template_bond.a)
+        atom_b = new_residue_template.atoms.get(template_bond.b)
+        
+        if (atom_a and atom_a.element == 1) or (atom_b and atom_b.element == 1):
+            continue  # Skip bonds to hydrogen
+            
+        new_a = (chain.id, target_res_num, new_res_name, template_bond.a)
+        new_b = (chain.id, target_res_num, new_res_name, template_bond.b)
+        
+        # Only add bond if both atoms exist in new_atoms (both are heavy atoms)
+        if new_a in new_atoms and new_b in new_atoms:
+            new_bond = template_bond._replace(a=new_a, b=new_b)
+            new_bonds.append(new_bond)
+    
+    # Update chirals - remove old ones involving target residue, add new ones
+    for chiral in chain.chirals:
+        # Check if any atom in chiral involves target residue
+        involves_target = any(
+            atom_key[0] == chain.id and 
+            atom_key[1] == target_res_num and 
+            atom_key[2] == target_res_name
+            for atom_key in chiral
+        )
+        
+        if not involves_target:
+            new_chirals.append(chiral)
+    
+    # Add chirals from new residue template (heavy atoms only)
+    for template_chiral in new_residue_template.chirals:
+        # Check if all atoms in chiral are heavy atoms and exist in new residue
+        new_chiral = []
+        skip_chiral = False
+        
+        for atom_name in template_chiral:
+            template_atom = new_residue_template.atoms.get(atom_name)
+            if template_atom and template_atom.element == 1:
+                skip_chiral = True  # Skip chirals involving hydrogens
+                break
+            new_atom_key = (chain.id, target_res_num, new_res_name, atom_name)
+            if new_atom_key in new_atoms:
+                new_chiral.append(new_atom_key)
+            else:
+                skip_chiral = True
+                break
+        
+        if not skip_chiral and len(new_chiral) == len(template_chiral):
+            new_chirals.append(new_chiral)
+    
+    # Update planars - remove old ones involving target residue, add new ones
+    for planar in chain.planars:
+        # Check if any atom in planar involves target residue
+        involves_target = any(
+            atom_key[0] == chain.id and 
+            atom_key[1] == target_res_num and 
+            atom_key[2] == target_res_name
+            for atom_key in planar
+        )
+        
+        if not involves_target:
+            new_planars.append(planar)
+    
+    # Add planars from new residue template (heavy atoms only)
+    for template_planar in new_residue_template.planars:
+        # Check if all atoms in planar are heavy atoms and exist in new residue
+        new_planar = []
+        skip_planar = False
+        
+        for atom_name in template_planar:
+            template_atom = new_residue_template.atoms.get(atom_name)
+            if template_atom and template_atom.element == 1:
+                skip_planar = True  # Skip planars involving hydrogens
+                break
+            new_atom_key = (chain.id, target_res_num, new_res_name, atom_name)
+            if new_atom_key in new_atoms:
+                new_planar.append(new_atom_key)
+            else:
+                skip_planar = True
+                break
+        
+        if not skip_planar and len(new_planar) == len(template_planar):
+            new_planars.append(new_planar)
+    
+    # Update automorphisms - remove groups involving target residue
+    for auto_group in chain.automorphisms:
+        new_auto_group = []
+        for auto_set in auto_group:
+            # Check if this set involves target residue
+            involves_target = any(
+                atom_key[0] == chain.id and 
+                atom_key[1] == target_res_num and 
+                atom_key[2] == target_res_name
+                for atom_key in auto_set
+            )
+            
+            if not involves_target:
+                new_auto_group.append(auto_set)
+        
+        if new_auto_group:  # Only add if not empty
+            new_automorphisms.append(new_auto_group)
+    
+    # Add automorphisms from new residue template (heavy atoms only)
+    for template_auto_group in new_residue_template.automorphisms:
+        new_auto_group = []
+        for template_auto_set in template_auto_group:
+            # Check if all atoms in this set are heavy atoms and exist in new residue
+            new_auto_set = []
+            skip_set = False
+            
+            for atom_name in template_auto_set:
+                template_atom = new_residue_template.atoms.get(atom_name)
+                if template_atom and template_atom.element == 1:
+                    skip_set = True  # Skip sets involving hydrogens
+                    break
+                new_atom_key = (chain.id, target_res_num, new_res_name, atom_name)
+                if new_atom_key in new_atoms:
+                    new_auto_set.append(new_atom_key)
+                else:
+                    skip_set = True
+                    break
+            
+            if not skip_set and len(new_auto_set) == len(template_auto_set):
+                new_auto_group.append(new_auto_set)
+        
+        if new_auto_group:
+            new_automorphisms.append(new_auto_group)
+    
+    # Create new chain
+    new_chain = Chain(
+        id=chain.id,
+        type=chain.type,
+        sequence=chain.sequence,  # Note: sequence string not updated here
+        residues=new_residues,
+        atoms=new_atoms,
+        bonds=new_bonds,
+        chirals=new_chirals,
+        planars=new_planars,
+        automorphisms=new_automorphisms
+    )
+    
+    return new_chain

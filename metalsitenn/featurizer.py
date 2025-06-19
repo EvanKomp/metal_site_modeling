@@ -11,7 +11,7 @@ import networkx as nx
 import warnings
 
 from metalsitenn.tokenizers import TOKENIZERS, Tokenizer
-from metalsitenn.placer_modules.cifutils import Chain
+from metalsitenn.placer_modules.cifutils import Chain, mutate_chain
 from metalsitenn.constants import I2E
 
 
@@ -51,19 +51,62 @@ class MetalSiteFeaturizer:
             if not hasattr(tokenizer, 'non_bonded_token_id'):
                 raise ValueError(f"Bond feature '{feature}' tokenizer must have non_bonded_token_id attribute")
     
-    def __call__(self, chain: Chain, **kwargs) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    def __call__(self, 
+                chain: Chain, 
+                do_masking: bool = False,
+                do_collapsing: bool = False,
+                mutations: List[Tuple[str, str, str]] = None,
+                # Masking parameters
+                mask_prob: float = 0.15,
+                random_token_prob: float = 0.02,
+                unchanged_loss_prob: float = 0.02,
+                mask_bonds: bool = True,
+                masking_random_seed: int = None,
+                # Collapsing parameters
+                collapse_rate: float = 0.3,
+                min_residues: int = 1,
+                fixed_ca: bool = True,
+                collapse_gaussian_sigma: float = 0.5,
+                center_gaussian_sigma: float = 0.2,
+                collapsing_random_seed: int = None,
+                resids_to_collapse: List[Tuple] = None,
+                **kwargs) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """
-        Convert a Chain object to tokenized atom and bond features.
+        Convert a Chain object to tokenized atom and bond features with optional masking, collapsing, and mutations.
         
         Args:
             chain: Chain object representing a metal binding site
+            do_masking: Whether to apply BERT-style masking to atoms and bonds
+            do_collapsing: Whether to apply residue position collapse
+            mutations: List of mutations to apply as (target_res_num, target_res_name, new_res_name) tuples
+            
+            # Masking parameters (only used if do_masking=True)
+            mask_prob: Probability of replacing an atom with mask token
+            random_token_prob: Probability of replacing an atom with random token
+            unchanged_loss_prob: Probability of keeping atom unchanged but including in loss
+            mask_bonds: Whether to mask bonds associated with masked atoms
+            masking_random_seed: Random seed for masking reproducibility
+            
+            # Collapsing parameters (only used if do_collapsing=True)
+            collapse_rate: Probability of selecting a residue for collapse
+            min_residues: Minimum number of residues to collapse
+            fixed_ca: Whether CA atoms of protein residues remain fixed
+            collapse_gaussian_sigma: Sigma for Gaussian noise when collapsing atoms
+            center_gaussian_sigma: Sigma for noising center atom position (when not fixed)
+            collapsing_random_seed: Random seed for collapsing reproducibility
+            resids_to_collapse: Optional list of (res_num, res_name) tuples specifying residues to collapse.
+                            If provided, overrides random selection based on collapse_rate and min_residues.
+            
             **kwargs: Additional arguments passed to self.tokenizers
             
         Returns:
             Tuple of (atom_features_dict, bond_features_dict, topology_features_dict)
             - atom_features_dict: Dict with keys as feature names, values as (N_atoms, 1) tensors
-                                 Always includes 'atom_resid', 'atom_resname' as lists, 'positions' as (N_atoms, 3) tensor
+                                Always includes 'atom_resid', 'atom_resname' as lists, 'positions' as (N_atoms, 3) tensor
+                                If masking: includes 'element_labels' and 'atom_loss_mask'
+                                If collapsing: includes 'positions_labels' and 'collapse_mask'
             - bond_features_dict: Dict with keys as feature names, values as (N_atoms, N_atoms) tensors
+                                If masking: includes 'bond_order_labels' and 'bond_loss_mask' (if 'bond_order' in features)
             - topology_features_dict: Dict with ChemNet-style bond/geometry data:
                                     'bonds', 'bond_lengths', 'chirals', 'planars'
             
@@ -73,6 +116,14 @@ class MetalSiteFeaturizer:
         if len(chain.atoms) == 0:
             warnings.warn("Chain has no atoms, returning empty features")
             return {}, {}, {}
+        
+        # Apply mutations if provided
+        mutated_residues = []
+        if mutations is not None:
+            for target_res_num, target_res_name, new_res_name in mutations:
+                chain = mutate_chain(chain, target_res_num, target_res_name, new_res_name)
+                # Store mutation info for potential position collapse
+                mutated_residues.append((target_res_num, new_res_name))
         
         # Create consistent atom ordering and indexing
         atom_keys = list(chain.atoms.keys())
@@ -100,6 +151,46 @@ class MetalSiteFeaturizer:
         # Process bond features
         if self.bond_features:
             bond_features_dict.update(self._process_bond_features(chain, atom_to_idx, n_atoms, **kwargs))
+
+        # Apply additional collapsing for mutated residues if mutations were made
+        if mutated_residues:
+            atom_features_dict, bond_features_dict = self.collapse_residues(
+                atom_features_dict=atom_features_dict,
+                bond_features_dict=bond_features_dict,
+                collapse_rate=0.0,  # Don't use random selection
+                min_residues=0,     # Don't force minimum
+                fixed_ca=True,      # Always fix CA for mutations
+                collapse_gaussian_sigma=collapse_gaussian_sigma,  # Use same sigma as main collapse
+                center_gaussian_sigma=center_gaussian_sigma,
+                random_seed=collapsing_random_seed,
+                resids_to_collapse=mutated_residues  # Collapse all mutated residues, this is basically just applying noise to the non Ca and getting the tensor that tells the model they were moved
+            )
+        
+        # Apply masking if requested
+        if do_masking:
+            atom_features_dict, bond_features_dict = self.mask_atoms(
+                atom_features_dict=atom_features_dict,
+                bond_features_dict=bond_features_dict,
+                mask_prob=mask_prob,
+                random_token_prob=random_token_prob,
+                unchanged_loss_prob=unchanged_loss_prob,
+                mask_bonds=mask_bonds,
+                random_seed=masking_random_seed
+            )
+        
+        # Apply collapsing if requested
+        if do_collapsing:
+            atom_features_dict, bond_features_dict = self.collapse_residues(
+                atom_features_dict=atom_features_dict,
+                bond_features_dict=bond_features_dict,
+                collapse_rate=collapse_rate,
+                min_residues=min_residues,
+                fixed_ca=fixed_ca,
+                collapse_gaussian_sigma=collapse_gaussian_sigma,
+                center_gaussian_sigma=center_gaussian_sigma,
+                random_seed=collapsing_random_seed,
+                resids_to_collapse=resids_to_collapse
+            )
         
         return atom_features_dict, bond_features_dict, topology_features_dict
     
@@ -160,8 +251,18 @@ class MetalSiteFeaturizer:
                 
                 feature_values.append(value)
             
-            # Convert to (N_atoms, 1) tensor
-            atom_features_dict[feature_name] = torch.tensor(feature_values, dtype=torch.long).unsqueeze(1)
+            atom_features_dict[feature_name] = feature_values
+
+        # convert all to tensors and reshape to (N_atoms, 1)
+        for feature_name in self.atom_features:
+            if feature_name in atom_features_dict:
+                feature_tensor = torch.tensor(atom_features_dict[feature_name], dtype=torch.long)
+                atom_features_dict[feature_name] = feature_tensor.view(n_atoms, 1)
+
+        # add a atom_loss_mask of zeros
+        atom_features_dict['atom_loss_mask'] = torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1)
+        # copy as the collapse mask
+        atom_features_dict['collapse_mask'] = atom_features_dict['atom_loss_mask'].clone()
         
         return atom_features_dict
     
@@ -197,35 +298,40 @@ class MetalSiteFeaturizer:
                 bond_matrix = torch.full((n_atoms, n_atoms), tokenizer.non_bonded_token_id, dtype=torch.long)
             else:
                 bond_matrix = torch.full((n_atoms, n_atoms), tokenizer.non_bonded_token_id, dtype=torch.float32)
-            
-            if feature_name == 'bond_distance':
-                # Special handling for bond distance - need to compute shortest paths
-                bond_matrix = self._compute_bond_distances(chain, atom_to_idx, n_atoms, tokenizer, **kwargs)
-            else:
-                # Process regular bond features
-                for bond in chain.bonds:
-                    i, j = atom_to_idx[bond.a], atom_to_idx[bond.b]
-                    
-                    # Extract the appropriate property based on feature name
-                    if feature_name == 'bond_order':
-                        value = tokenizer.encode(bond.order, **kwargs)
-                    elif feature_name == 'is_aromatic':
-                        value = tokenizer.encode(bond.aromatic, **kwargs)
-                    elif feature_name == 'is_in_ring':
-                        value = tokenizer.encode(bond.in_ring, **kwargs)
-                    else:
-                        raise ValueError(f"Unknown bond feature: {feature_name}")
-                    
-                    # Set symmetric values (bonds are undirected)
-                    bond_matrix[i, j] = value
-                    bond_matrix[j, i] = value
+        
+                
+            # Process regular bond features
+            for bond in chain.bonds:
+                i, j = atom_to_idx[bond.a], atom_to_idx[bond.b]
+                
+                # Extract the appropriate property based on feature name
+                if feature_name == 'bond_order':
+                    value = tokenizer.encode(bond.order, **kwargs)
+                elif feature_name == 'is_aromatic':
+                    value = tokenizer.encode(bond.aromatic, **kwargs)
+                elif feature_name == 'is_in_ring':
+                    value = tokenizer.encode(bond.in_ring, **kwargs)
+                else:
+                    raise ValueError(f"Unknown bond feature: {feature_name}")
+                
+                # Set symmetric values (bonds are undirected)
+                bond_matrix[i, j] = value
+                bond_matrix[j, i] = value
             
             bond_features_dict[feature_name] = bond_matrix
+
+        # add bonding graph distances
+        distance_matrix = self._compute_bond_distances(chain, atom_to_idx, n_atoms, **kwargs)
+        bond_features_dict['bond_distances'] = distance_matrix
+
+        # initialize bond_loss_mask as zeros
+        bond_features_dict['bond_loss_mask'] = torch.zeros((n_atoms, n_atoms), dtype=torch.bool)
+
         
         return bond_features_dict
     
     def _compute_bond_distances(self, chain: Chain, atom_to_idx: Dict, n_atoms: int, 
-                               tokenizer, **kwargs) -> torch.Tensor:
+                               **kwargs) -> torch.Tensor:
         """
         Compute bond distances using NetworkX shortest path algorithm.
         
@@ -240,7 +346,7 @@ class MetalSiteFeaturizer:
             (N_atoms, N_atoms) tensor of tokenized bond distances
         """
         # Initialize matrix with non-bonded tokens (distance > 7 or disconnected)
-        distance_matrix = torch.full((n_atoms, n_atoms), tokenizer.non_bonded_token_id, dtype=torch.long)
+        distance_matrix = torch.full((n_atoms, n_atoms), 0, dtype=torch.long)
         
         # Build NetworkX graph
         G = nx.Graph()
@@ -264,9 +370,7 @@ class MetalSiteFeaturizer:
                     continue
                 j = atom_to_idx[atom_b]
                 
-                # Tokenize distance (tokenizer handles distance > 7 by setting to 0)
-                tokenized_distance = tokenizer.encode(distance, **kwargs)
-                distance_matrix[i, j] = tokenized_distance
+                distance_matrix[i, j] = distance
         
         return distance_matrix
     
@@ -471,30 +575,31 @@ class MetalSiteFeaturizer:
     
 
     def mask_atoms(self, 
-                atom_features_dict: Dict[str, torch.Tensor], 
-                bond_features_dict: Dict[str, torch.Tensor],
-                mask_prob: float = 0.15,
-                mask_token_prob: float = 0.8,
-                random_token_prob: float = 0.1,
-                mask_bonds: bool = True,
-                                random_seed: int = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+                    atom_features_dict: Dict[str, torch.Tensor], 
+                    bond_features_dict: Dict[str, torch.Tensor],
+                    mask_prob: float = 0.15,
+                    random_token_prob: float = 0.02,
+                    unchanged_loss_prob: float = 0.02,
+                    mask_bonds: bool = True,
+                    random_seed: int = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """
-        Apply BERT-style masking to atom and bond features.
+        Apply BERT-style masking to atom and bond features with independent probabilities.
         
         Args:
             atom_features_dict: Dictionary of atom features from __call__
             bond_features_dict: Dictionary of bond features from __call__
-            mask_prob: Probability of selecting an atom for masking
-            mask_token_prob: Probability of replacing selected atom with mask token (of selected atoms)
-            random_token_prob: Probability of replacing selected atom with random token (of selected atoms)
+            mask_prob: Probability of replacing an atom with mask token
+            random_token_prob: Probability of replacing an atom with random token
+            unchanged_loss_prob: Probability of keeping atom unchanged but including in loss
             mask_bonds: Whether to mask bonds associated with masked atoms
             random_seed: Random seed for reproducibility
             
         Returns:
-            Tuple of (masked_atom_features, masked_bond_features, loss_masks) where:
+            Tuple of (masked_atom_features, masked_bond_features) where:
             - masked_atom_features: Atom features with masking applied
             - masked_bond_features: Bond features with masking applied
-            - loss_masks: Dict containing 'atom_mask' (1D bool tensor) and optionally 'bond_mask' (2D bool tensor)
+            - atom_loss_mask: 1D bool tensor indicating atoms to compute loss on
+            - bond_loss_mask: 2D bool tensor indicating bonds to compute loss on (optional)
             
         Raises:
             ValueError: If 'element' not in atom_features or if required tokenizers missing
@@ -515,25 +620,27 @@ class MetalSiteFeaturizer:
                             for k, v in atom_features_dict.items()}
         masked_bond_features = {k: v.clone() if isinstance(v, torch.Tensor) else v.copy() 
                             for k, v in bond_features_dict.items()}
-        # copy labels for atom features
+        
+        # Copy labels for atom features
         masked_atom_features['element_labels'] = masked_atom_features['element'].clone()
         
-        
-        # Select atoms for masking
+        # Independent probability selections
         mask_selection = torch.rand(n_atoms) < mask_prob
-        selected_indices = torch.where(mask_selection)[0]
+        random_selection = torch.rand(n_atoms) < random_token_prob
+        unchanged_selection = torch.rand(n_atoms) < unchanged_loss_prob
         
-        if len(selected_indices) == 0:
+        # Get indices for each type of selection
+        mask_indices = torch.where(mask_selection)[0]
+        random_indices = torch.where(random_selection)[0]
+        unchanged_indices = torch.where(unchanged_selection)[0]
+        
+        # Union of all selected atoms for loss computation
+        all_selected_indices = torch.unique(torch.cat([mask_indices, random_indices, unchanged_indices]))
+        
+        if len(all_selected_indices) == 0:
+            # No atoms selected, add empty loss mask and return
+            masked_atom_features['atom_loss_mask'] = torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1)
             return masked_atom_features, masked_bond_features
-        
-        # Apply BERT-style masking to selected atoms
-        n_selected = len(selected_indices)
-        
-        # Determine masking strategy for each selected atom
-        mask_decisions = torch.rand(n_selected)
-        mask_with_token = mask_decisions < mask_token_prob
-        mask_with_random = (mask_decisions >= mask_token_prob) & (mask_decisions < mask_token_prob + random_token_prob)
-        # Remaining atoms (mask_decisions >= mask_token_prob + random_token_prob) are left unchanged
         
         # Get element tokenizer
         element_tokenizer = self.tokenizers['element']
@@ -546,44 +653,47 @@ class MetalSiteFeaturizer:
             tokenizer = self.tokenizers[feature_name]
             feature_tensor = masked_atom_features[feature_name]  # Shape: (n_atoms, 1)
             
-            for i, atom_idx in enumerate(selected_indices):
-                if mask_with_token[i]:
-                    # Replace with mask token
-                    if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
-                        feature_tensor[atom_idx, 0] = tokenizer.mask_token_id
-                elif mask_with_random[i]:
-                    # Replace with random token
-                    if feature_name == 'element':
-                        # For element, sample from protein atoms + full_context_metals
-                        vocab_items = list(element_tokenizer.get_vocab().keys())
-                        # Exclude special tokens
-                        vocab_items = [item for item in vocab_items if not isinstance(item, str) or not item.startswith('<')]
-                        random_element = vocab_items[torch.randint(len(vocab_items), (1,)).item()]
-                        feature_tensor[atom_idx, 0] = element_tokenizer.encode(random_element)
-                    else:
-                        # For other features, sample from valid vocabulary
-                        vocab_size = tokenizer.vocab_size
-                        # Exclude special tokens - assume they're at the beginning
-                        start_idx = len(tokenizer.special_tokens) if hasattr(tokenizer, 'special_tokens') else 0
-                        random_token = torch.randint(start_idx, vocab_size, (1,)).item()
-                        feature_tensor[atom_idx, 0] = random_token
+            # Apply mask tokens
+            for atom_idx in mask_indices:
+                if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
+                    feature_tensor[atom_idx, 0] = tokenizer.mask_token_id
+            
+            # Apply random tokens
+            for atom_idx in random_indices:
+                if feature_name == 'element':
+                    # For element, sample from protein atoms + full_context_metals
+                    vocab_items = list(element_tokenizer.get_vocab().keys())
+                    # Exclude special tokens
+                    vocab_items = [item for item in vocab_items if not isinstance(item, str) or not item.startswith('<')]
+                    random_element = vocab_items[torch.randint(len(vocab_items), (1,)).item()]
+                    feature_tensor[atom_idx, 0] = element_tokenizer.encode(random_element)
+                else:
+                    # For other features, sample from valid vocabulary
+                    vocab_size = tokenizer.vocab_size
+                    # Exclude special tokens - assume they're at the beginning
+                    start_idx = len(tokenizer.special_tokens) if hasattr(tokenizer, 'special_tokens') else 0
+                    random_token = torch.randint(start_idx, vocab_size, (1,)).item()
+                    feature_tensor[atom_idx, 0] = random_token
+            
+            # unchanged_indices atoms remain unchanged (no modification needed)
         
-        # Create atom loss mask (True for atoms we want to compute loss on)
-        # In BERT style, we compute loss on ALL selected atoms (masked, random, AND unchanged)
-        atom_loss_mask = torch.zeros(n_atoms, dtype=torch.bool)
-        atom_loss_mask[selected_indices] = True
-        masked_atom_features['atom_mask'] = atom_loss_mask
+        # Create atom loss mask (True for all selected atoms)
+        atom_loss_mask = torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1)
+        atom_loss_mask[all_selected_indices] = True
+        # join with the existing atom_loss_mask, eg if either are true
+        previous_mask = masked_atom_features.get('atom_loss_mask', torch.zeros(n_atoms, dtype=torch.bool)) 
+        masked_atom_features['atom_loss_mask'] = previous_mask | atom_loss_mask
         
         # Handle bond masking if requested
         if mask_bonds and bond_features_dict:
             assert 'bond_order' in bond_features_dict, "Bond features must include 'bond_order' for masking"
-            # copy bond order labels
+            # Copy bond order labels
             masked_bond_features['bond_order_labels'] = masked_bond_features['bond_order'].clone()
 
-            # Only mask bond features for atoms that were actually changed (not unchanged ones)
-            masked_atom_indices = selected_indices[mask_with_token | mask_with_random]
+            # Only mask bond features for atoms that were actually modified (mask + random tokens)
+            modified_atom_indices = torch.unique(torch.cat([mask_indices]))
             
-            # Mask bond features for masked atoms
+            # Mask bond features for modified atoms
             for feature_name in self.bond_features:
                     
                 if feature_name not in masked_bond_features:
@@ -593,8 +703,8 @@ class MetalSiteFeaturizer:
                 bond_matrix = masked_bond_features[feature_name]  # Shape: (n_atoms, n_atoms)
                 
                 if hasattr(tokenizer, 'mask_token_id') and tokenizer.mask_token_id is not None:
-                    # Mask rows and columns for masked atoms
-                    for atom_idx in masked_atom_indices:
+                    # Mask rows and columns for modified atoms
+                    for atom_idx in modified_atom_indices:
                         bond_matrix[atom_idx, :] = tokenizer.mask_token_id
                         bond_matrix[:, atom_idx] = tokenizer.mask_token_id
             
@@ -607,8 +717,8 @@ class MetalSiteFeaturizer:
                 bond_tokenizer = self.tokenizers['bond_order']
                 actual_bonds = original_bond_matrix != bond_tokenizer.non_bonded_token_id
                 
-                # Mark masked bonds for loss computation
-                for atom_idx in masked_atom_indices:
+                # Mark bonds involving modified atoms for loss computation
+                for atom_idx in modified_atom_indices:
                     # Mark bonds involving this atom
                     bond_loss_mask[atom_idx, :] = actual_bonds[atom_idx, :]
                     bond_loss_mask[:, atom_idx] = actual_bonds[:, atom_idx]
@@ -640,8 +750,9 @@ class MetalSiteFeaturizer:
                         # Mirror to lower triangle
                         bond_loss_mask = bond_loss_mask | bond_loss_mask.T
                 
-                                
-                    masked_bond_features['bond_mask'] = bond_loss_mask
+                # join with previous bond_loss_mask if it exists
+                previous_bond_mask = masked_bond_features.get('bond_loss_mask', torch.zeros((n_atoms, n_atoms), dtype=torch.bool))
+                masked_bond_features['bond_loss_mask'] = previous_bond_mask | bond_loss_mask
         
         return masked_atom_features, masked_bond_features
     
@@ -653,6 +764,7 @@ class MetalSiteFeaturizer:
                         fixed_ca: bool = True,
                         collapse_gaussian_sigma: float = 0.5,
                         center_gaussian_sigma: float = 0.2,
+                        resids_to_collapse: List[Tuple] = None,
                         random_seed: int = None) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
         """
         Apply residue collapse by selecting residues and collapsing their atoms around a center atom.
@@ -665,11 +777,13 @@ class MetalSiteFeaturizer:
         Args:
             atom_features_dict: Dictionary of atom features from __call__
             bond_features_dict: Dictionary of bond features from __call__
-            collapse_rate: Probability of selecting a residue for collapse
-            min_residues: Minimum number of residues to collapse
+            collapse_rate: Probability of selecting a residue for collapse (ignored if resids_to_collapse given)
+            min_residues: Minimum number of residues to collapse (ignored if resids_to_collapse given)
             fixed_ca: Whether CA atoms of protein residues remain fixed
             collapse_gaussian_sigma: Sigma for Gaussian noise when collapsing atoms
             center_gaussian_sigma: Sigma for noising center atom position (when not fixed)
+            resids_to_collapse: Optional list of (res_num, res_name) tuples specifying residues to collapse.
+                            If provided, overrides random selection based on collapse_rate and min_residues.
             random_seed: Random seed for reproducibility
             
         Returns:
@@ -713,22 +827,47 @@ class MetalSiteFeaturizer:
         residue_keys = list(residue_to_atoms.keys())
         n_residues = len(residue_keys)
         
-        # Determine number of residues to collapse
-        n_collapse = max(min_residues, int(collapse_rate * n_residues))
-        n_collapse = min(n_collapse, n_residues)  # Can't collapse more than available
+        if resids_to_collapse is not None:
+            # Use user-specified residues
+            selected_residue_keys = []
+            for target_resid in resids_to_collapse:
+                # Find matching residue key - target_resid should be (res_num, res_name)
+                matching_keys = [
+                    res_key for res_key in residue_keys 
+                    if (res_key[0], res_key[1]) == target_resid
+                ]
+                if matching_keys:
+                    selected_residue_keys.extend(matching_keys)
+                else:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"Warning: Residue {target_resid} not found in structure")
+            
+            n_collapse = len(selected_residue_keys)
+        else:
+            # Use random selection based on collapse_rate and min_residues
+            n_collapse = max(min_residues, int(collapse_rate * n_residues))
+            n_collapse = min(n_collapse, n_residues)  # Can't collapse more than available
+            
+            if n_collapse == 0:
+                # No residues to collapse, return original with labels
+                collapse_mask = torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1)
+                collapsed_atom_features['collapse_mask'] = collapse_mask
+                return collapsed_atom_features, collapsed_bond_features
+            
+            # Randomly select residues to collapse
+            selected_residues = torch.randperm(n_residues)[:n_collapse]
+            selected_residue_keys = [residue_keys[i] for i in selected_residues]
         
-        if n_collapse == 0:
+        # Check if any residues were selected for collapse
+        if n_collapse == 0 or len(selected_residue_keys) == 0:
             # No residues to collapse, return original with labels
-            collapse_mask = torch.zeros(n_atoms, dtype=torch.bool)
+            collapse_mask = torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1)
             collapsed_atom_features['collapse_mask'] = collapse_mask
             return collapsed_atom_features, collapsed_bond_features
         
-        # Randomly select residues to collapse
-        selected_residues = torch.randperm(n_residues)[:n_collapse]
-        selected_residue_keys = [residue_keys[i] for i in selected_residues]
-        
         # Initialize collapse mask
-        collapse_mask = torch.zeros(n_atoms, dtype=torch.bool)
+        collapse_mask = torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1)
         
         # Process each selected residue
         for res_key in selected_residue_keys:
@@ -776,7 +915,8 @@ class MetalSiteFeaturizer:
                     collapsed_atom_features['positions'][atom_idx] = center_pos + collapse_noise
                     collapse_mask[atom_idx] = True
         
-        # Add collapse mask to features
-        collapsed_atom_features['collapse_mask'] = collapse_mask
+        # Add collapse mask to features - join with previous mask if it exists
+        previous_collapse_mask = collapsed_atom_features.get('collapse_mask', torch.zeros(n_atoms, dtype=torch.bool).reshape(n_atoms, 1))
+        collapsed_atom_features['collapse_mask'] = previous_collapse_mask | collapse_mask
         
         return collapsed_atom_features, collapsed_bond_features

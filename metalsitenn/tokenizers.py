@@ -681,43 +681,6 @@ class RingTokenizer(Tokenizer):
                 f"special_tokens={self.special_tokens})")
     
 
-class BondDistanceTokenizer(Tokenizer):
-    """
-    Specialized tokenizer for bond distances.
-    
-    This is distance in the number of bonds between sense, not angstrom sense.
-    If distance is > 7 or in a differnt graph, it will be assigned the same token
-    """
-
-    def __init__(self):
-        distance_vocab = list(range(0, 8))  # [0, 1, 2, 3, 4, 5, 6, 7]
-        super().__init__(distance_vocab, error_on_unknown=True, use_mask=True)
-
-
-    def encode(self, item: Any, **kwargs) -> int:
-        """
-        Convert a bond distance value to its integer index.
-        
-        Args:
-            item: Bond distance value to encode (int or float)
-            **kwargs: Additional keyword arguments (for compatibility)
-            
-        Returns:
-            Integer index of the bond distance value or special token
-            
-        Raises:
-            ValueError: If distance is out of range and error_on_unknown=True
-            TypeError: If item cannot be converted to integer
-        """
-        if item > 7:
-            item =0
-        # Use parent encode method
-        return super().encode(item, **kwargs)
-    
-    @property
-    def non_bonded_token_id(self) -> int:
-        """Index of the 0 (non-bonded) token."""
-        return self.d2i[0]
 
 
 TOKENIZERS = {
@@ -728,6 +691,5 @@ TOKENIZERS = {
     'bond_order': BondOrderTokenizer(),
     'is_aromatic': AromaticTokenizer(),
     'is_in_ring': RingTokenizer(),
-    'bond_distance': BondDistanceTokenizer(),
 }
     

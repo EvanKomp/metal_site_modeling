@@ -327,7 +327,9 @@ def visualize_featurized_metal_site_3d(
     background_color: str = 'white',
     show_labels: bool = False,
     stick_radius: float = 0.1,
-    sphere_radius: float = 0.3
+    sphere_radius: float = 0.3,
+    highlight_atoms = None,
+    highlight_color = 'pink',
 ) -> py3Dmol.view:
     """
     Visualize a featurized metal binding site in 3D using py3Dmol.
@@ -407,6 +409,9 @@ def visualize_featurized_metal_site_3d(
         elif highlight_metals and (element in ALL_METALS or element == 'Fe'):
             color = metal_color
             radius = metal_size
+        elif highlight_atoms is not None and i in highlight_atoms:
+            color = highlight_color
+            radius = sphere_radius * 1.5
         else:
             # Use CPK colors for common elements
             cpk_colors = {
