@@ -571,7 +571,7 @@ class HybdridizaitonTokenizer(Tokenizer):
     def __init__(self):
         """Initialize HybridizationTokenizer with hybridization states and <MASK> token."""
         hybridization_vocab = list(range(0, 6))  # [0, 1, 2, 3, 4, 5]
-        super().__init__(hybridization_vocab, error_on_unknown=True, use_mask=True)
+        super().__init__(hybridization_vocab, error_on_unknown=False, use_mask=True)
 
 
 class BondOrderTokenizer(Tokenizer):
@@ -595,7 +595,7 @@ class BondOrderTokenizer(Tokenizer):
         bond_order_vocab = list(range(0, 5))  # [1, 2, 3, 4]
         
         # Initialize parent tokenizer with error_on_unknown=True and use_mask=True
-        super().__init__(bond_order_vocab, error_on_unknown=True, use_mask=True)
+        super().__init__(bond_order_vocab, error_on_unknown=False, use_mask=True)
     
     @property
     def non_bonded_token_id(self) -> int:

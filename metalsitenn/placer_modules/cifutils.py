@@ -956,7 +956,8 @@ class CIFParser:
                     skip_sites_with_entities: Union[List[str], str] = None,
                     min_amino_acids: int = None,
                     max_water_bfactor: float = None,
-                    backbone_treatment: str = 'bound') -> List[Dict]:
+                    backbone_treatment: str = 'bound',
+                    clean_metal_bonding_patterns: bool = True) -> List[Dict]:
         """Extract metal binding sites from protein structure with optional atom limit and filtering.
         
         Args:
@@ -970,6 +971,9 @@ class CIFParser:
             max_water_bfactor: Maximum B-factor for water oxygen atoms. Water molecules with
                             oxygen B-factors above this threshold are excluded (optional)
             backbone_treatment: Treatment of backbone atoms - 'bound' (default), 'free', or 'ca_only'
+            clean_metal_bonding_patters: Openbabel isn't good at parsing metal coordination - it misses interresidue bonds and
+                assigns the wrong hybridization state to metal atoms. This option removes all explicit bonds to metals, unnasigns
+                their hybridization state (state will get the unknown token doen the road).
             
         Returns:
             List of metal site dictionaries
@@ -1009,7 +1013,7 @@ class CIFParser:
         # 3. Extract binding site for each metal cluster
         for cluster in metal_clusters:
             site_data = self._extract_binding_site(
-                cluster, chains, cutoff_distance, max_atoms_per_site, max_water_bfactor, backbone_treatment
+                cluster, chains, cutoff_distance, max_atoms_per_site, max_water_bfactor, backbone_treatment, clean_metal_bonding_patterns
             )
             if site_data:
                 # Apply post-processing filters
@@ -1126,7 +1130,9 @@ class CIFParser:
                             cutoff: float,
                             max_atoms: int = None,
                             max_water_bfactor: float = None,
-                            backbone_treatment: str = 'bound') -> Dict:
+                            backbone_treatment: str = 'bound',
+                            clean_metal_bonding_patterns: bool = True
+                            ) -> Dict:
         """Extract binding site around a metal cluster including complete residues.
         Explicitly excludes hydrogen atoms from the binding site.
         
@@ -1202,6 +1208,10 @@ class CIFParser:
         site_chain = self._create_site_chain(
             metal_cluster, nearby_residues, nearby_atoms, chains, backbone_treatment
         )
+
+        # clean up metals
+        if clean_metal_bonding_patterns:
+            site_chain = self.clean_metal_bonding_patterns(site_chain)
         
         return {
             'metal_atoms': metal_cluster,
@@ -1670,6 +1680,145 @@ class CIFParser:
             filtered_bonds.append(bond)
         
         return filtered_atoms, filtered_bonds
+
+
+    def clean_metal_bonding_patterns(self, chain: 'Chain') -> 'Chain':
+        """
+        Clean metal bonding patterns by removing metal hybridization and bonds involving metals.
+        
+        This method:
+        1. Sets hybridization state to None for all metal atoms
+        2. Removes all bonds involving metal atoms  
+        3. Removes chirals and planars containing metal atoms
+        
+        Args:
+            chain: Chain object to clean
+            
+        Returns:
+            New Chain object with cleaned metal bonding patterns
+        """
+        import copy
+        
+        # Create a copy of the chain to avoid modifying the original
+        cleaned_chain = copy.deepcopy(chain)
+        
+        # Step 1: Identify metal atoms and set their hybridization to None
+        metal_atom_keys = set()
+        for atom_key, atom in cleaned_chain.atoms.items():
+            if atom.metal:
+                metal_atom_keys.add(atom_key)
+                # Set hybridization to None for metal atoms
+                cleaned_chain.atoms[atom_key] = atom._replace(hyb=None)
+        
+        # Step 2: Remove bonds involving metal atoms
+        cleaned_bonds = []
+        for bond in cleaned_chain.bonds:
+            if bond.a not in metal_atom_keys and bond.b not in metal_atom_keys:
+                cleaned_bonds.append(bond)
+        
+        # Step 3: Remove chirals containing metal atoms
+        cleaned_chirals = []
+        for chiral in cleaned_chain.chirals:
+            # Check if any atom in the chiral constraint is a metal
+            has_metal = any(atom_key in metal_atom_keys for atom_key in chiral)
+            if not has_metal:
+                cleaned_chirals.append(chiral)
+        
+        # Step 4: Remove planars containing metal atoms
+        cleaned_planars = []
+        for planar in cleaned_chain.planars:
+            # Check if any atom in the planar constraint is a metal
+            has_metal = any(atom_key in metal_atom_keys for atom_key in planar)
+            if not has_metal:
+                cleaned_planars.append(planar)
+        
+        # Step 5: Clean automorphisms - remove groups containing metal atoms
+        cleaned_automorphisms = []
+        for auto_group in cleaned_chain.automorphisms:
+            cleaned_auto_group = []
+            for auto_set in auto_group:
+                # Check if any atom in this automorphism set is a metal
+                has_metal = any(atom_key in metal_atom_keys for atom_key in auto_set)
+                if not has_metal:
+                    cleaned_auto_group.append(auto_set)
+            
+            # Only keep automorphism groups that still have meaningful content
+            if cleaned_auto_group:
+                cleaned_automorphisms.append(cleaned_auto_group)
+        
+        # Step 6: Update residue-level bonding patterns
+        cleaned_residues = {}
+        for res_pos, residue in cleaned_chain.residues.items():
+            if residue is not None:
+                # Clean bonds within this residue
+                residue_bonds = []
+                for bond in residue.bonds:
+                    # Create full atom keys for this residue
+                    full_a_key = (cleaned_chain.id, res_pos, residue.name, bond.a)
+                    full_b_key = (cleaned_chain.id, res_pos, residue.name, bond.b)
+                    
+                    if full_a_key not in metal_atom_keys and full_b_key not in metal_atom_keys:
+                        residue_bonds.append(bond)
+                
+                # Clean chirals within this residue
+                residue_chirals = []
+                for chiral in residue.chirals:
+                    # Create full atom keys for this residue
+                    full_chiral_keys = [(cleaned_chain.id, res_pos, residue.name, atom_name) 
+                                    for atom_name in chiral]
+                    has_metal = any(key in metal_atom_keys for key in full_chiral_keys)
+                    if not has_metal:
+                        residue_chirals.append(chiral)
+                
+                # Clean planars within this residue
+                residue_planars = []
+                for planar in residue.planars:
+                    # Create full atom keys for this residue
+                    full_planar_keys = [(cleaned_chain.id, res_pos, residue.name, atom_name) 
+                                    for atom_name in planar]
+                    has_metal = any(key in metal_atom_keys for key in full_planar_keys)
+                    if not has_metal:
+                        residue_planars.append(planar)
+                
+                # Clean automorphisms within this residue
+                residue_automorphisms = []
+                for auto_group in residue.automorphisms:
+                    cleaned_auto_group = []
+                    for auto_set in auto_group:
+                        # Create full atom keys for this residue
+                        full_auto_keys = [(cleaned_chain.id, res_pos, residue.name, atom_name) 
+                                        for atom_name in auto_set]
+                        has_metal = any(key in metal_atom_keys for key in full_auto_keys)
+                        if not has_metal:
+                            cleaned_auto_group.append(auto_set)
+                    
+                    if cleaned_auto_group:
+                        residue_automorphisms.append(cleaned_auto_group)
+                
+                # Update the residue with cleaned bonding patterns
+                cleaned_residues[res_pos] = residue._replace(
+                    bonds=residue_bonds,
+                    chirals=residue_chirals,
+                    planars=residue_planars,
+                    automorphisms=residue_automorphisms
+                )
+            else:
+                cleaned_residues[res_pos] = residue
+        
+        # Create the cleaned chain
+        cleaned_chain = Chain(
+            id=cleaned_chain.id,
+            type=cleaned_chain.type,
+            sequence=cleaned_chain.sequence,
+            residues=cleaned_residues,
+            atoms=cleaned_chain.atoms,  # Already updated in step 1
+            bonds=cleaned_bonds,
+            chirals=cleaned_chirals,
+            planars=cleaned_planars,
+            automorphisms=cleaned_automorphisms
+        )
+        
+        return cleaned_chain
 
     def get_standard_amino_acids(self) -> Dict[str, Residue]:
         """
