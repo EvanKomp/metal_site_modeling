@@ -317,6 +317,7 @@ def visualize_metal_site_3d(site_data: Dict,
 def visualize_featurized_metal_site_3d(
     atom_features_dict: Dict[str, torch.Tensor],
     bond_features_dict: Dict[str, torch.Tensor],
+    velocities: torch.Tensor = None,  # New parameter: (N_atoms, 3) velocity vectors
     width: int = 800,
     height: int = 600,
     highlight_metals: bool = True,
@@ -330,13 +331,20 @@ def visualize_featurized_metal_site_3d(
     sphere_radius: float = 0.3,
     highlight_atoms = None,
     highlight_color = 'pink',
+    # Velocity visualization parameters
+    show_velocities: bool = True,
+    velocity_scale: float = 1.0,
+    velocity_color: str = 'blue',
+    velocity_radius: float = 0.05,
+    velocity_threshold: float = 0.1,  # Min velocity magnitude to display
 ) -> py3Dmol.view:
     """
-    Visualize a featurized metal binding site in 3D using py3Dmol.
+    Visualize a featurized metal binding site in 3D using py3Dmol with optional velocity vectors.
     
     Args:
         atom_features_dict: Dictionary of atom features from MetalSiteFeaturizer
-        bond_features_dict: Dictionary of bond features from MetalSiteFeaturizer  
+        bond_features_dict: Dictionary of bond features from MetalSiteFeaturizer
+        velocities: Optional (N_atoms, 3) tensor of velocity vectors for each atom
         width: Width of the viewer in pixels
         height: Height of the viewer in pixels
         highlight_metals: Whether to highlight metal atoms differently
@@ -348,6 +356,13 @@ def visualize_featurized_metal_site_3d(
         show_labels: Whether to show atom labels
         stick_radius: Radius for stick bonds
         sphere_radius: Radius for atom spheres
+        highlight_atoms: List/set of atom indices to highlight
+        highlight_color: Color for highlighted atoms
+        show_velocities: Whether to display velocity vectors
+        velocity_scale: Scale factor for velocity vector length
+        velocity_color: Color for velocity arrows
+        velocity_radius: Radius for velocity arrows
+        velocity_threshold: Minimum velocity magnitude to display arrow
         
     Returns:
         py3Dmol viewer object ready for display
@@ -360,6 +375,14 @@ def visualize_featurized_metal_site_3d(
     missing_features = [f for f in required_atom_features if f not in atom_features_dict]
     if missing_features:
         raise ValueError(f"Missing required atom features: {missing_features}")
+    
+    # Validate velocities if provided
+    if velocities is not None:
+        positions = atom_features_dict['positions']
+        if velocities.shape[0] != positions.shape[0]:
+            raise ValueError(f"Velocities shape {velocities.shape} doesn't match positions shape {positions.shape}")
+        if velocities.shape[1] != 3:
+            raise ValueError(f"Velocities must have shape (N_atoms, 3), got {velocities.shape}")
     
     # Get basic data
     positions = atom_features_dict['positions']  # (N_atoms, 3)
@@ -440,6 +463,44 @@ def visualize_featurized_metal_site_3d(
                 'fontColor': 'black',
                 'fontSize': 10
             })
+    
+    # Add velocity vectors if provided and requested
+    if velocities is not None and show_velocities:
+        velocities_np = velocities.numpy()
+        
+        for i in range(n_atoms):
+            pos = positions[i].numpy()
+            vel = velocities_np[i]
+            
+            # Calculate velocity magnitude
+            vel_magnitude = np.linalg.norm(vel)
+            
+            # Only show arrow if velocity magnitude is above threshold
+            if vel_magnitude > velocity_threshold:
+                # Scale velocity vector
+                scaled_vel = vel * velocity_scale
+                
+                # Calculate end position
+                end_pos = pos + scaled_vel
+                
+                # Add arrow from atom position in direction of velocity
+                viewer.addArrow({
+                    'start': {'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2])},
+                    'end': {'x': float(end_pos[0]), 'y': float(end_pos[1]), 'z': float(end_pos[2])},
+                    'radius': velocity_radius,
+                    'color': velocity_color,
+                    'alpha': 0.8
+                })
+                
+                # Optionally add velocity magnitude as label
+                if show_labels:
+                    vel_label_pos = pos + scaled_vel * 0.5  # Midpoint of arrow
+                    viewer.addLabel(f"v={vel_magnitude:.2f}", {
+                        'position': {'x': float(vel_label_pos[0]), 'y': float(vel_label_pos[1]), 'z': float(vel_label_pos[2])},
+                        'backgroundColor': 'lightblue',
+                        'fontColor': 'black',
+                        'fontSize': 8
+                    })
     
     # Add bonds if bond features are available
     if 'bond_order' in bond_features_dict:
