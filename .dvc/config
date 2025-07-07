@@ -1,0 +1,4 @@
+[core]
+    site_cache_dir = /projects/metalsitenn/tmp/dvctmp
+[cache]
+    type = "hardlink,reflink,copy"

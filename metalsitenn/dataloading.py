@@ -46,7 +46,17 @@ def timeout_handler(seconds=300):  # 5 m timeout per file
         signal.signal(signal.SIGALRM, old_handler)
 
 def get_entity_type(res_name: str, atom_key: tuple, site_chain: 'Chain') -> str:
-    """Determine entity type from residue name and check if residue contains metals."""
+    """
+    Determine entity type from residue name and check if residue contains metals.
+    
+    Args:
+        res_name: 3-letter residue name
+        atom_key: Original atom key tuple (chain_id, res_num, res_name, atom_name)
+        site_chain: Site-specific Chain object with renumbered residues
+        
+    Returns:
+        Entity type: 'water', 'amino_acid', 'nucleotide', 'metal_ligand', or 'organic_ligand'
+    """
     if res_name == 'HOH':
         return 'water'
     elif res_name in RESNAME_3LETTER:
@@ -55,12 +65,16 @@ def get_entity_type(res_name: str, atom_key: tuple, site_chain: 'Chain') -> str:
         return 'nucleotide'
     else:
         # Check if this residue contains any metal atoms
-        res_key = (atom_key[0], atom_key[1], atom_key[2])  # chain, res_num, res_name
-        if res_key in site_chain.residues and site_chain.residues[res_key]:
-            residue = site_chain.residues[res_key]
-            for atom in residue.atoms.values():
-                if atom.metal:
-                    return 'metal_ligand'
+        # The atom_key contains the original chain/residue info, but we need to check
+        # atoms in the site_chain which has been renumbered.
+        # We can check by looking for any atom in site_chain with the same residue name
+        # that has the metal flag set.
+        
+        for site_atom_key, site_atom in site_chain.atoms.items():
+            # site_atom_key is (chain_id, res_num, res_name, atom_name)
+            if site_atom_key[2] == res_name and site_atom.metal:
+                return 'metal_ligand'
+        
         return 'organic_ligand'
 
 def extract_site_metadata(site_data: Dict, pdb_code: str, site_idx: int) -> Dict[str, Any]:
@@ -74,9 +88,6 @@ def extract_site_metadata(site_data: Dict, pdb_code: str, site_idx: int) -> Dict
     Returns:
         Dictionary with site metadata for filtering and analysis
     """
-    
-    
-    
     site_name = f"{pdb_code}_{site_idx}"
     
     # Count entities by type
