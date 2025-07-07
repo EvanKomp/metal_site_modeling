@@ -1,121 +1,132 @@
 stages:
-  1.1_parse_site_data:
-    cmd: python pipeline/1.1_parse_site_data.py
+  1.1_parse_sites_metadata:
+    cmd: python pipeline/1/1.1_parse_sites_metadata.py
+    params:
+    - data.source
+    - data.debug_max_files
+    - data.remove_entities
+    - data.skip_sites_with_entities 
+    - data.backbone_treatment
+    - data.metal_aggregation_distance
+    - data.metal_site_radius
+    - data.max_atoms_per_site
+    - data.coordination_distance
+    - data.min_coordinating_residues_per_site
+    - data.min_residues_per_site
+    - data.max_water_bfactor
+    - data.n_cores
     deps:
-    - pipeline/1.1_parse_site_data.py
-    - data/mf_sites
+    - pipeline/1/1.1_parse_sites_metadata.py
     outs:
-    - data/site_labels.csv
-    metrics:
-    - data/metrics/site_label_metrics.json
+    - data/1/1.1_parse_sites_metadata
 
-  1.2_create_dataset:
-    cmd: python pipeline/1.2_create_dataset.py
-    deps:
-    - pipeline/1.2_create_dataset.py
-    - data/mf_sites
-    outs:
-    - data/dataset/metal_site_dataset
-    - data/dataset/tokenizer.pkl
-    params:
-    - data.model_hydrogens
-    - data.metal_known
-    - data.aggregate_uncommon
-    - data.test_frac
+  # 1.2_create_dataset:
+  #   cmd: python pipeline/1.2_create_dataset.py
+  #   deps:
+  #   - pipeline/1.2_create_dataset.py
+  #   - data/mf_sites
+  #   outs:
+  #   - data/dataset/metal_site_dataset
+  #   - data/dataset/tokenizer.pkl
+  #   params:
+  #   - data.model_hydrogens
+  #   - data.metal_known
+  #   - data.aggregate_uncommon
+  #   - data.test_frac
 
-  1.3_get_avg_num_neighbors:
-    cmd: python pipeline/1.3_get_avg_num_neighbors.py
-    params:
-    - model.max_radius
-    - training.debug_use_toy
-    deps:
-    - pipeline/1.3_get_avg_num_neighbors.py
-    - data/dataset/metal_site_dataset
-    - data/toy_dataset
-    metrics:
-    - data/training_avg_num_neighbors.json
+  # 1.3_get_avg_num_neighbors:
+  #   cmd: python pipeline/1.3_get_avg_num_neighbors.py
+  #   params:
+  #   - model.max_radius
+  #   - training.debug_use_toy
+  #   deps:
+  #   - pipeline/1.3_get_avg_num_neighbors.py
+  #   - data/dataset/metal_site_dataset
+  #   - data/toy_dataset
+  #   metrics:
+  #   - data/training_avg_num_neighbors.json
 
-  1.4_compute_null_model:
-    cmd: python pipeline/1.4_compute_null_model.py
-    deps:
-      - pipeline/1.4_compute_null_model.py
-      - data/dataset/metal_site_dataset
-      - data/toy_dataset
-      - data/dataset/tokenizer.pkl
-    params:
-      - training.debug_use_toy
-      - training.mask_rate
-      - training.noise_rate
-      - training.noise_scale
-    metrics:
-      - data/metrics/null_model_metrics.json
+  # 1.4_compute_null_model:
+  #   cmd: python pipeline/1.4_compute_null_model.py
+  #   deps:
+  #     - pipeline/1.4_compute_null_model.py
+  #     - data/dataset/metal_site_dataset
+  #     - data/toy_dataset
+  #     - data/dataset/tokenizer.pkl
+  #   params:
+  #     - training.debug_use_toy
+  #     - training.mask_rate
+  #     - training.noise_rate
+  #     - training.noise_scale
+  #   metrics:
+  #     - data/metrics/null_model_metrics.json
 
-  2.1_self_supervised_training:
-    cmd: accelerate launch pipeline/2.1_self_supervised_training.py
-    deps:
-    - pipeline/2.1_self_supervised_training.py
-    - data/dataset/metal_site_dataset
-    - data/toy_dataset
-    - data/dataset/tokenizer.pkl
-    - data/training_avg_num_neighbors.json
-    - data/metrics/null_model_metrics.json
-    params:
-    - model.model_atom_types
-    - model.l
-    - model.hidden_scale
-    - model.hidden_scale_decay
-    - model.fc_neurons
-    - model.num_heads
-    - model.atom_embed_dim
-    - model.max_radius
-    - model.num_basis
-    - model.num_layers
-    - model.alpha_drop
-    - model.proj_drop
-    - model.drop_path_rate
-    - model.label_smoothing_factor
-    - model.imbalance_loss_reweight
-    - model.imbalance_loss_temperature
-    - training.debug_sample
-    - training.debug_use_toy
-    - training.mask_rate
-    - training.noise_rate
-    - training.noise_scale
-    - training.eval_steps
-    - training.logging_steps
-    - training.load_best_model_at_end
-    - training.num_epochs
-    - training.per_device_batch_size
-    - training.gradient_accumulation_steps
-    - training.dataloader_num_workers
-    - training.learning_rate
-    - training.weight_decay
-    - training.gradient_clipping
-    - training.frac_noise_loss
-    - training.warmup_pct
-    - training.use_early_stopping
-    - training.early_stopping_patience
-    - training.early_stopping_improvement_fraction
-    - embedding.how
-    - embedding.hidden_state
-    - embedding.hdbscan_min_cluster_size
-    - embedding.hdbscan_min_samples
-    - embedding.hdbscan_alpha
-    - embedding.tsne_perplexity
-    - embedding.tsne_learning_rate
-    - embedding.tsne_n_iter
-    outs:
-    - data/model_pretraining/final_model
-    - data/model_pretraining/eval_2d_space
-    - data/model_pretraining/checkpoints
-    metrics:
-    - data/model_pretraining/dvclive/metrics.json
-    plots:
-    - data/plots/atom_weights.png
-    - data/model_pretraining/dvclive/plots/metrics:
-        x: step
-    - data/model_pretraining/dvclive/plots/custom/eval_2d_space.json:
-        template: scatter
-        x: x
-        y: y
+  # 2.1_self_supervised_training:
+  #   cmd: accelerate launch pipeline/2.1_self_supervised_training.py
+  #   deps:
+  #   - pipeline/2.1_self_supervised_training.py
+  #   - data/dataset/metal_site_dataset
+  #   - data/toy_dataset
+  #   - data/dataset/tokenizer.pkl
+  #   - data/training_avg_num_neighbors.json
+  #   - data/metrics/null_model_metrics.json
+  #   params:
+  #   - model.model_atom_types
+  #   - model.l
+  #   - model.hidden_scale
+  #   - model.hidden_scale_decay
+  #   - model.fc_neurons
+  #   - model.num_heads
+  #   - model.atom_embed_dim
+  #   - model.max_radius
+  #   - model.num_basis
+  #   - model.num_layers
+  #   - model.alpha_drop
+  #   - model.proj_drop
+  #   - model.drop_path_rate
+  #   - model.label_smoothing_factor
+  #   - model.imbalance_loss_reweight
+  #   - model.imbalance_loss_temperature
+  #   - training.debug_sample
+  #   - training.debug_use_toy
+  #   - training.mask_rate
+  #   - training.noise_rate
+  #   - training.noise_scale
+  #   - training.eval_steps
+  #   - training.logging_steps
+  #   - training.load_best_model_at_end
+  #   - training.num_epochs
+  #   - training.per_device_batch_size
+  #   - training.gradient_accumulation_steps
+  #   - training.dataloader_num_workers
+  #   - training.learning_rate
+  #   - training.weight_decay
+  #   - training.gradient_clipping
+  #   - training.frac_noise_loss
+  #   - training.warmup_pct
+  #   - training.use_early_stopping
+  #   - training.early_stopping_patience
+  #   - training.early_stopping_improvement_fraction
+  #   - embedding.how
+  #   - embedding.hidden_state
+  #   - embedding.hdbscan_min_cluster_size
+  #   - embedding.hdbscan_min_samples
+  #   - embedding.hdbscan_alpha
+  #   - embedding.tsne_perplexity
+  #   - embedding.tsne_learning_rate
+  #   - embedding.tsne_n_iter
+  #   outs:
+  #   - data/model_pretraining/final_model
+  #   - data/model_pretraining/eval_2d_space
+  #   - data/model_pretraining/checkpoints
+  #   metrics:
+  #   - data/model_pretraining/dvclive/metrics.json
+  #   plots:
+  #   - data/plots/atom_weights.png
+  #   - data/model_pretraining/dvclive/plots/metrics:
+  #       x: step
+  #   - data/model_pretraining/dvclive/plots/custom/eval_2d_space.json:
+  #       template: scatter
+  #       x: x
+  #       y: y
 

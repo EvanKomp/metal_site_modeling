@@ -951,29 +951,29 @@ class CIFParser:
     def get_metal_sites(self, 
                     parsed_data: Union[Dict, str], 
                     cutoff_distance: float = 6.0,
+                    coordination_distance: float = 2.0,
                     merge_threshold: float = 10.0,
                     max_atoms_per_site: int = None,
                     skip_sites_with_entities: Union[List[str], str] = None,
                     min_amino_acids: int = None,
+                    min_coordinating_amino_acids: int = None,
                     max_water_bfactor: float = None,
-                    backbone_treatment: str = 'bound',
-                    clean_metal_bonding_patterns: bool = True) -> List[Dict]:
+                    backbone_treatment: str = 'bound') -> List[Dict]:
         """Extract metal binding sites from protein structure with optional atom limit and filtering.
         
         Args:
             parsed_data: Either output from parse() or filename to parse
             cutoff_distance: Distance in Angstroms to include residues around metal
+            coordination_distance: Distance in Angstroms for coordination shell analysis
             merge_threshold: If metals are closer than this, handle as single site
             max_atoms_per_site: Maximum heavy atoms per binding site (optional)
             skip_sites_with_entities: List of entity names to avoid (skip entire site if present),
                                     or 'non_metal' to only allow amino acids, water, and metals
             min_amino_acids: Minimum number of amino acid residues required in site (optional)
+            min_coordinating_amino_acids: Minimum number of amino acid residues within coordination_distance (optional)
             max_water_bfactor: Maximum B-factor for water oxygen atoms. Water molecules with
                             oxygen B-factors above this threshold are excluded (optional)
             backbone_treatment: Treatment of backbone atoms - 'bound' (default), 'free', or 'ca_only'
-            clean_metal_bonding_patters: Openbabel isn't good at parsing metal coordination - it misses interresidue bonds and
-                assigns the wrong hybridization state to metal atoms. This option removes all explicit bonds to metals, unnasigns
-                their hybridization state (state will get the unknown token doen the road).
             
         Returns:
             List of metal site dictionaries
@@ -1013,27 +1013,28 @@ class CIFParser:
         # 3. Extract binding site for each metal cluster
         for cluster in metal_clusters:
             site_data = self._extract_binding_site(
-                cluster, chains, cutoff_distance, max_atoms_per_site, max_water_bfactor, backbone_treatment, clean_metal_bonding_patterns
+                cluster, chains, cutoff_distance, coordination_distance, max_atoms_per_site, max_water_bfactor, backbone_treatment
             )
             if site_data:
                 # Apply post-processing filters
-                if self._should_include_site(site_data, skip_sites_with_entities, min_amino_acids):
+                if self._should_include_site(site_data, skip_sites_with_entities, min_amino_acids, min_coordinating_amino_acids):
                     metal_sites.append(site_data)
         
         return metal_sites
-
     
     def _should_include_site(self, 
                             site_data: Dict, 
                             skip_entities: Union[List[str], str] = None,
-                            min_amino_acids: int = None) -> bool:
+                            min_amino_acids: int = None,
+                            min_coordinating_amino_acids: int = None) -> bool:
         """Determine if a metal binding site should be included based on filtering criteria.
         
         Args:
             site_data: Metal binding site data dictionary
             skip_entities: List of entity names to avoid (skip site if any present), 
                         or 'non_metal' to only allow amino acids, water, and metals
-            min_amino_acids: Minimum number of amino acid residues required
+            min_amino_acids: Minimum number of amino acid residues required in site
+            min_coordinating_amino_acids: Minimum number of amino acid residues within coordination distance
             
         Returns:
             True if site should be included, False otherwise
@@ -1063,7 +1064,7 @@ class CIFParser:
                             logger.debug(f"Skipping site due to non-metal entity: {res_name}")
                             return False
         
-        # Check minimum amino acid requirement
+        # Check minimum total amino acid requirement
         if min_amino_acids is not None:
             # Count amino acid residues using RESNAME_3LETTER
             amino_acid_count = 0
@@ -1074,6 +1075,19 @@ class CIFParser:
             
             if amino_acid_count < min_amino_acids:
                 logger.debug(f"Skipping site due to insufficient amino acids: {amino_acid_count} < {min_amino_acids}")
+                return False
+        
+        # Check minimum coordinating amino acid requirement
+        if min_coordinating_amino_acids is not None:
+            # Count coordinating amino acid residues
+            coordinating_amino_acid_count = 0
+            for res_key in site_data['coordinating_residues']:
+                res_name = res_key[2]  # residue name is at index 2
+                if res_name in RESNAME_3LETTER:
+                    coordinating_amino_acid_count += 1
+            
+            if coordinating_amino_acid_count < min_coordinating_amino_acids:
+                logger.debug(f"Skipping site due to insufficient coordinating amino acids: {coordinating_amino_acid_count} < {min_coordinating_amino_acids}")
                 return False
         
         return True
@@ -1128,11 +1142,10 @@ class CIFParser:
                             metal_cluster: List[Dict], 
                             chains: Dict, 
                             cutoff: float,
+                            coordination_distance: float,
                             max_atoms: int = None,
                             max_water_bfactor: float = None,
-                            backbone_treatment: str = 'bound',
-                            clean_metal_bonding_patterns: bool = True
-                            ) -> Dict:
+                            backbone_treatment: str = 'bound') -> Dict:
         """Extract binding site around a metal cluster including complete residues.
         Explicitly excludes hydrogen atoms from the binding site.
         
@@ -1140,6 +1153,7 @@ class CIFParser:
             metal_cluster: List of metal atoms in cluster
             chains: All chains from parsed structure
             cutoff: Distance cutoff for including residues
+            coordination_distance: Distance cutoff for coordination analysis
             max_atoms: Maximum number of heavy atoms allowed in binding site (optional)
             max_water_bfactor: Maximum B-factor for water oxygen atoms (optional)
             backbone_treatment: Treatment of backbone atoms - 'bound', 'free', or 'ca_only'
@@ -1172,60 +1186,96 @@ class CIFParser:
                     res_key = (atom_key[0], atom_key[1], atom_key[2])  # chain, res_num, res_name
                     nearby_residues_set.add(res_key)
         
-        # Second pass: collect ALL heavy atoms from identified residues
-        # Apply water B-factor filtering here
-        nearby_atoms = {}
-        nearby_residues = {}
+        # Second pass: collect all heavy atoms from identified residues
+        nearby_residues = {}  # res_key -> list of atom_keys
+        nearby_atoms = {}     # atom_key -> atom
         
-        for res_key in nearby_residues_set:
-            chain_id, res_num, res_name = res_key
-            
-            # Check if this is a water residue that should be filtered
-            if self._should_exclude_water_residue(res_key, chains[chain_id], max_water_bfactor):
-                logger.debug(f"Excluding water residue {res_key} due to B-factor filtering")
-                continue
+        for chain_id, chain in chains.items():
+            for atom_key, atom in chain.atoms.items():
+                # Skip hydrogen atoms
+                if atom.element == 1:
+                    continue
                 
-            if res_key not in nearby_residues:
-                nearby_residues[res_key] = []
-            
-            # Get all heavy atoms from this residue
-            for atom_key, atom in chains[chain_id].atoms.items():
-                if (atom_key[0] == chain_id and 
-                    atom_key[1] == res_num and 
-                    atom_key[2] == res_name and
-                    atom.element > 1):  # Only heavy atoms (element > 1)
+                res_key = (atom_key[0], atom_key[1], atom_key[2])
+                if res_key in nearby_residues_set:
+                    # Apply water B-factor filtering if specified
+                    if self._should_exclude_water_residue(res_key, chain, max_water_bfactor):
+                        continue
                     
+                    if res_key not in nearby_residues:
+                        nearby_residues[res_key] = []
                     nearby_residues[res_key].append(atom_key)
                     nearby_atoms[atom_key] = atom
         
-        # Apply atom limit if specified (this now affects complete residues of heavy atoms only)
+        # Remove any residues that ended up with no atoms after filtering
+        nearby_residues = {k: v for k, v in nearby_residues.items() if v}
+        
+        if not nearby_residues:
+            return None
+        
+        # NEW: Calculate coordinating residues (within coordination_distance)
+        coordinating_residues = set()
+        
+        for res_key, atom_list in nearby_residues.items():
+            res_name = res_key[2]
+            if res_name in RESNAME_3LETTER:  # Only analyze amino acids for coordination
+                for atom_key in atom_list:
+                    atom = nearby_atoms[atom_key]
+                    if atom.element > 1:  # Heavy atoms only
+                        atom_coords = np.array(atom.xyz)
+                        min_dist_to_metal = min(
+                            np.linalg.norm(atom_coords - np.array(m['coords']))
+                            for m in metal_cluster
+                        )
+                        if min_dist_to_metal <= coordination_distance:
+                            coordinating_residues.add(res_key)
+                            break  # Found at least one coordinating atom in this residue
+        
+        # Apply atom limit if specified
         if max_atoms is not None and len(nearby_atoms) > max_atoms:
             nearby_atoms, nearby_residues = self._apply_atom_limit(
                 nearby_residues, nearby_atoms, max_atoms, metal_cluster, chains
             )
+            
+            # Recalculate coordinating residues after atom limit is applied
+            coordinating_residues = set()
+            for res_key, atom_list in nearby_residues.items():
+                res_name = res_key[2]
+                if res_name in RESNAME_3LETTER:
+                    for atom_key in atom_list:
+                        if atom_key in nearby_atoms:  # Check if atom survived filtering
+                            atom = nearby_atoms[atom_key]
+                            if atom.element > 1:
+                                atom_coords = np.array(atom.xyz)
+                                min_dist_to_metal = min(
+                                    np.linalg.norm(atom_coords - np.array(m['coords']))
+                                    for m in metal_cluster
+                                )
+                                if min_dist_to_metal <= coordination_distance:
+                                    coordinating_residues.add(res_key)
+                                    break
         
         # Create new chain with only the binding site
         site_chain = self._create_site_chain(
             metal_cluster, nearby_residues, nearby_atoms, chains, backbone_treatment
         )
-
-        # clean up metals
-        if clean_metal_bonding_patterns:
-            site_chain = self.clean_metal_bonding_patterns(site_chain)
         
         return {
             'metal_atoms': metal_cluster,
             'center': center,
             'nearby_residues': nearby_residues,
+            'coordinating_residues': coordinating_residues,
             'site_chain': site_chain,
             'n_metals': len(metal_cluster),
             'n_residues': len(nearby_residues),
+            'n_coordinating_residues': len(coordinating_residues),
             'n_atoms': len(nearby_atoms),  # This is now heavy atoms only
             'atom_limit_applied': max_atoms is not None and len(nearby_atoms) > max_atoms,
             'complete_residues': True,  # Flag to indicate this includes complete residues
             'heavy_atoms_only': True,   # Flag to indicate hydrogens are excluded
             'water_bfactor_filtered': max_water_bfactor is not None,  # Flag to indicate water filtering applied
-            'backbone_treatment': backbone_treatment  # Flag to indicate backbone treatment applied
+            'backbone_treatment': backbone_treatment,  # Flag to indicate backbone treatment applied
+            'coordination_distance': coordination_distance  # Store coordination distance used
         }
     
     def _apply_atom_limit(self,

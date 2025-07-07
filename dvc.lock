@@ -238,3 +238,88 @@ stages:
       hash: md5
       md5: 9fbe142c783d8dd05c808e703935fad8
       size: 211
+  1.1_parse_sites_metadata:
+    cmd: python pipeline/1/1.1_parse_sites_metadata.py
+    deps:
+    - path: pipeline/1/1.1_parse_sites_metadata.py
+      hash: md5
+      md5: bec36ddce485671839ec375c52231b5d
+      size: 5289
+    params:
+      params.yaml:
+        data.backbone_treatment: free
+        data.coordination_distance: 2.9
+        data.debug_max_files:
+        data.max_atoms_per_site: 400
+        data.max_water_bfactor: 18
+        data.metal_aggregation_distance: 4
+        data.metal_site_radius: 6
+        data.min_coordinating_residues_per_site: 3
+        data.min_residues_per_site: 3
+        data.n_cores: 104
+        data.remove_entities:
+        - SO4
+        - PO4
+        - CL
+        - BR
+        - I
+        - NO3
+        - ACT
+        - FMT
+        - TRS
+        - BIC
+        - TRA
+        - MES
+        - BIS
+        - EPE
+        - IMD
+        - GOL
+        - ETG
+        - PEG
+        - PG4
+        - PGE
+        - MPD
+        - DMS
+        - SUC
+        - TRE
+        - XYL
+        - ERY
+        - ACE
+        - EOH
+        - MOH
+        - IPA
+        - BUT
+        - DMF
+        - DMSO
+        - LDA
+        - OP1
+        - C8E
+        - DDM
+        - BOG
+        - LMT
+        - IOD
+        - XE
+        - KR
+        - BCB
+        - BTB
+        - CR
+        - MB
+        - UNX
+        - UNL
+        - UNK
+        - DUM
+        - AMS
+        - LIS
+        - CAS
+        - MPO
+        - NEP
+        - PEN
+        - HEX
+        data.skip_sites_with_entities:
+        data.source: /datasets/alphafold_data/data_v2/pdb_mmcif/mmcif_files
+    outs:
+    - path: data/1/1.1_parse_sites_metadata
+      hash: md5
+      md5: 29a5186678da8f4c27250e242d8bc8c5.dir
+      size: 2982959996
+      nfiles: 124129
