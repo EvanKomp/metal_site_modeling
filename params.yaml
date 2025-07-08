@@ -2,7 +2,7 @@ data:
   # data source
   source: "/datasets/alphafold_data/data_v2/pdb_mmcif/mmcif_files" # Source of data, e.g. "mfs", "cif", "pdb"
   # source: "./tmp/tmp_cifs"
-  debug_max_files: 100 # Maximum number of sites to use for debugging
+  debug_max_files: null # Maximum number of sites to use for debugging
 
   # related to tokenization
   metal_known: false # Use unique tokens for metals vs generic METAL token
@@ -19,7 +19,7 @@ data:
   min_coordinating_residues_per_site: 3 # Minimum number of residues coordinating the metal to consider a site valid
   min_residues_per_site: 3 # Minimum number of residues in a site to consider it valid
   max_water_bfactor: 18
-  n_cores: 20
+  n_cores: 104
   
   test_frac: 0.05 # Fraction of data to use for testing
 
