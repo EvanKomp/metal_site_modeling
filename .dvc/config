@@ -1,4 +1,7 @@
 [core]
     site_cache_dir = /projects/metalsitenn/tmp/dvctmp
+    remote = metalremote
 [cache]
     type = "hardlink,reflink,copy"
+['remote "metalremote"']
+    url = /projects/metalsitenn/dvccache
