@@ -1,4 +1,1 @@
 # .gitmodules
-[submodule "equiformer"]
-	path = equiformer
-	url = git@github.com:EvanKomp/equiformer.git
