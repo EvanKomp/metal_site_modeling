@@ -447,9 +447,9 @@ class MetalSiteDataset:
             )
         
         if self.min_metals is not None:
-            mask &= self.metadata_df['n_metals'] >= self.min_metals
+            mask &= self.metadata_df['n_metal_ligands'] >= self.min_metals
         if self.max_metals is not None:
-            mask &= self.metadata_df['n_metals'] <= self.max_metals
+            mask &= self.metadata_df['n_metal_ligands'] <= self.max_metals
             
         if self.min_organic_ligands is not None:
             mask &= self.metadata_df['n_organic_ligands'] >= self.min_organic_ligands

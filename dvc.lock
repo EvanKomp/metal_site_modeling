@@ -249,14 +249,14 @@ stages:
       params.yaml:
         data.backbone_treatment: free
         data.coordination_distance: 2.9
-        data.debug_max_files: 100
+        data.debug_max_files:
         data.max_atoms_per_site: 400
         data.max_water_bfactor: 18
         data.metal_aggregation_distance: 4
         data.metal_site_radius: 6
         data.min_coordinating_residues_per_site: 3
         data.min_residues_per_site: 3
-        data.n_cores: 20
+        data.n_cores: 104
         data.remove_entities:
         - SO4
         - PO4
@@ -320,6 +320,6 @@ stages:
     outs:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 25239c6cf20ad6a21888a057735fcce6.dir
-      size: 263604
-      nfiles: 23
+      md5: d7cc8b86fe10063b3d6e31849b00dcab.dir
+      size: 607716422
+      nfiles: 43806

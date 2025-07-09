@@ -43,7 +43,7 @@ stages:
   #   - pipeline/1.3_get_avg_num_neighbors.py
   #   - data/dataset/metal_site_dataset
   #   - data/toy_dataset
-  #   metrics:
+
   #   - data/training_avg_num_neighbors.json
 
   # 1.4_compute_null_model:
