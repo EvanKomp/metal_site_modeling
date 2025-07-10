@@ -1023,6 +1023,8 @@ class CIFParser:
                     total_removed_atoms += 1
             
             for res_key, residue in chain.residues.items():
+                if residue is None:
+                    pass
                 chain_res_key = (chain_id, res_key[0], residue.name)  # (chain_id, res_num, res_name)
                 if chain_res_key not in unresolved_residues:
                     filtered_residues[res_key] = residue
