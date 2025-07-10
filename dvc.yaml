@@ -17,6 +17,8 @@ stages:
     - data.n_cores
     deps:
     - pipeline/1/1.1_parse_sites_metadata.py
+    - metalsitenn/dataloading.py
+    - metalsitenn/placer_modules/cifutils.py
     outs:
     - data/1/1.1_parse_sites_metadata
 

@@ -579,25 +579,28 @@ class CIFParser:
 
 
         ########################################################
-        # 4. populate residues with coordinates
+        # 4. populate residues with coordinates & track resolved residues
         ########################################################
         
+        # Track which residues actually appear in atom_site records # unresolved filtering
+        resolved_residues = set()  # unresolved filtering
+        
         i = {k:atom_site.getIndex(val) for k,val in [('hetero', 'group_PDB'),
-                                                     ('symbol', 'type_symbol'),
-                                                     ('atm', 'label_atom_id'), # atom name
-                                                     ('res', 'label_comp_id'), # residue name (3-letter)
-                                                     ('chid', 'label_asym_id'), # chain ID
-                                                     ('num', 'label_seq_id'), # sequence number
-                                                     ('num_author', 'auth_seq_id'), # sequence number a
-                                                     ('alt', 'label_alt_id'), # alternative location ID
-                                                     ('x', 'Cartn_x'), # xyz coords
-                                                     ('y', 'Cartn_y'),
-                                                     ('z', 'Cartn_z'),
-                                                     ('occ', 'occupancy'), # occupancy
-                                                     ('bfac', 'B_iso_or_equiv'), # B-factors 
-                                                     ('model', 'pdbx_PDB_model_num') # model number (for multi-model PDBs, e.g. NMR)
+                                                    ('symbol', 'type_symbol'),
+                                                    ('atm', 'label_atom_id'), # atom name
+                                                    ('res', 'label_comp_id'), # residue name (3-letter)
+                                                    ('chid', 'label_asym_id'), # chain ID
+                                                    ('num', 'label_seq_id'), # sequence number
+                                                    ('num_author', 'auth_seq_id'), # sequence number assigned by the author
+                                                    ('alt', 'label_alt_id'), # alternative location ID
+                                                    ('x', 'Cartn_x'), # xyz coords
+                                                    ('y', 'Cartn_y'),
+                                                    ('z', 'Cartn_z'),
+                                                    ('occ', 'occupancy'), # occupancy
+                                                    ('bfac', 'B_iso_or_equiv'), # B-factors 
+                                                    ('model', 'pdbx_PDB_model_num') # model number (for multi-model PDBs, e.g. NMR)
                                                     ]}
-    
+
         for r in atom_site.getRowList():
 
             hetero, symbol, atm, res, chid, num, num_author, alt, x, y, z, occ, bfac, model = \
@@ -613,6 +616,10 @@ class CIFParser:
                 continue
             if num not in chains[chid]['res'].keys():
                 continue
+            
+            # Track this residue as resolved since it appears in atom_site # unresolved filtering
+            resolved_residues.add((chid, num))  # unresolved filtering
+            
             residue = chains[chid]['res'][num]
             # skip if residue is not in the library
             if residue is not None and residue.name==res:
@@ -625,9 +632,25 @@ class CIFParser:
                 atom = residue.atoms[atm]
                 if occ>atom.occ:
                     residue.atoms[atm] = atom._replace(xyz=[x,y,z], 
-                                                       occ=occ,
-                                                       bfac=bfac,
-                                                       hetero=(hetero=='HETATM'))
+                                                    occ=occ,
+                                                    bfac=bfac,
+                                                    hetero=(hetero=='HETATM'))
+
+
+        ########################################################
+        # Filter out unresolved residues
+        ########################################################
+        
+        # Remove residues that didn't appear in atom_site records # unresolved filtering
+        for chain_id, chain_data in chains.items():  # unresolved filtering
+            if 'res' in chain_data:  # unresolved filtering
+                original_res_count = len(chain_data['res'])  # unresolved filtering
+                # Keep only residues that were resolved in atom_site # unresolved filtering
+                chain_data['res'] = {res_num: residue for res_num, residue in chain_data['res'].items()  # unresolved filtering
+                                if (chain_id, res_num) in resolved_residues}  # unresolved filtering
+                filtered_res_count = len(chain_data['res'])  # unresolved filtering
+                if original_res_count != filtered_res_count:  # unresolved filtering
+                    logger.debug(f"Chain {chain_id}: filtered {original_res_count - filtered_res_count} unresolved residues")  # unresolved filtering
 
 
         ########################################################
@@ -947,6 +970,85 @@ class CIFParser:
                     continue
                 f.write("%-6s%5d%5d\n" % ("CONECT", a2i[bond.a], a2i[bond.b]))
 
+    def _detect_unresolved_residues(self, chains: Dict) -> set:
+        """Detect residues containing unresolved atoms (at origin with bfactor=0.0).
+        
+        Args:
+            chains: Dictionary of chain_id -> Chain objects
+            
+        Returns:
+            Set of residue keys (chain_id, res_num, res_name) to remove
+        """
+        unresolved_residues = set()
+        
+        for chain_id, chain in chains.items():
+            for atom_key, atom in chain.atoms.items():
+                # Check if atom is unresolved: at origin and bfactor = 0.0
+                if atom.element == 1:
+                    continue # hydrogens are rarely resolved and thats okay.
+                if (np.allclose(atom.xyz, [0.0, 0.0, 0.0], atol=1e-6) and 
+                    abs(atom.bfac) < 1e-6):
+                    res_key = (chain_id, atom_key[1], atom_key[2])  # (chain_id, res_num, res_name)
+                    unresolved_residues.add(res_key)
+                    logger.debug(f"Detected unresolved atom in residue {res_key}: {atom_key}")
+        
+        return unresolved_residues
+
+    def _remove_unresolved_residues(self, chains: Dict, unresolved_residues: set) -> Dict:
+        """Remove entire residues that contain unresolved atoms.
+        
+        Args:
+            chains: Dictionary of chain_id -> Chain objects
+            unresolved_residues: Set of residue keys to remove
+            
+        Returns:
+            Updated chains dictionary with unresolved residues removed
+        """
+        if not unresolved_residues:
+            return chains
+        
+        updated_chains = {}
+        total_removed_atoms = 0
+        
+        for chain_id, chain in chains.items():
+            # Filter atoms and residues
+            filtered_atoms = {}
+            filtered_residues = {}
+            
+            for atom_key, atom in chain.atoms.items():
+                res_key = (chain_id, atom_key[1], atom_key[2])
+                if res_key not in unresolved_residues:
+                    filtered_atoms[atom_key] = atom
+                else:
+                    total_removed_atoms += 1
+            
+            for res_key, residue in chain.residues.items():
+                if residue is None:
+                    pass
+                chain_res_key = (chain_id, res_key[0], residue.name)  # (chain_id, res_num, res_name)
+                if chain_res_key not in unresolved_residues:
+                    filtered_residues[res_key] = residue
+                else:
+                    pass
+            
+            # Filter bonds to remove any involving removed atoms
+            filtered_bonds = [
+                bond for bond in chain.bonds
+                if (bond.a in filtered_atoms and bond.b in filtered_atoms)
+            ]
+            
+            # Create updated chain
+            updated_chains[chain_id] = chain._replace(
+                atoms=filtered_atoms,
+                residues=filtered_residues,
+                bonds=filtered_bonds
+            )
+        
+        if total_removed_atoms > 0:
+            logger.info(f"Removed {len(unresolved_residues)} residues containing {total_removed_atoms} unresolved atoms")
+        
+        return updated_chains
+
 
     def get_metal_sites(self, 
                     parsed_data: Union[Dict, str], 
@@ -959,7 +1061,7 @@ class CIFParser:
                     min_coordinating_amino_acids: int = None,
                     max_water_bfactor: float = None,
                     backbone_treatment: str = 'bound') -> List[Dict]:
-        """Extract metal binding sites from protein structure with optional atom limit and filtering.
+        """Extract metal binding sites from protein structure with unresolved atom handling.
         
         Args:
             parsed_data: Either output from parse() or filename to parse
@@ -987,15 +1089,22 @@ class CIFParser:
             chains, assemblies, covalent, meta = self.parse(parsed_data)
         else:
             chains, assemblies, covalent, meta = parsed_data
+
+        # remove all
+        
+        unresolved_residues = self._detect_unresolved_residues(chains)
+        original_chains_with_unresolved = copy.deepcopy(chains)  # Keep copy with unresolved
+        
+        if unresolved_residues:
+            chains = self._remove_unresolved_residues(chains, unresolved_residues)
         
         metal_sites = []
         
-        # 1. Find all metal atoms across all chains
+        # Find all metal atoms across all chains
         all_metal_atoms = []
         for chain_id, chain in chains.items():
             for atom_key, atom in chain.atoms.items():
-                # Double check: exclude hydrogens (element 1) and deuterium (element not in heavy atoms)
-                if atom.metal and atom.element > 1:  # element > 1 excludes hydrogen
+                if atom.metal and atom.element > 1:
                     all_metal_atoms.append({
                         'chain_id': chain_id,
                         'atom_key': atom_key,
@@ -1007,15 +1116,22 @@ class CIFParser:
         if not all_metal_atoms:
             return []
         
-        # 2. Group nearby metals using distance clustering
+        # Group nearby metals using distance clustering
         metal_clusters = self._cluster_metals(all_metal_atoms, merge_threshold)
         
-        # 3. Extract binding site for each metal cluster
+        # Extract binding site for each metal cluster
         for cluster in metal_clusters:
             site_data = self._extract_binding_site(
-                cluster, chains, cutoff_distance, coordination_distance, max_atoms_per_site, max_water_bfactor, backbone_treatment
+                cluster, chains, cutoff_distance, coordination_distance, 
+                max_atoms_per_site, max_water_bfactor, backbone_treatment
             )
             if site_data:
+                # NEW: Count unresolved residues that would have been in this site
+                unresolved_count = self._count_unresolved_in_site(
+                    cluster, original_chains_with_unresolved, unresolved_residues, cutoff_distance
+                )
+                site_data['n_unresolved_removed'] = unresolved_count
+                
                 # Apply post-processing filters
                 if self._should_include_site(site_data, skip_sites_with_entities, min_amino_acids, min_coordinating_amino_acids):
                     metal_sites.append(site_data)
@@ -1269,14 +1385,65 @@ class CIFParser:
             'n_metals': len(metal_cluster),
             'n_residues': len(nearby_residues),
             'n_coordinating_residues': len(coordinating_residues),
-            'n_atoms': len(nearby_atoms),  # This is now heavy atoms only
+            'n_atoms': len(nearby_atoms),
             'atom_limit_applied': max_atoms is not None and len(nearby_atoms) > max_atoms,
-            'complete_residues': True,  # Flag to indicate this includes complete residues
-            'heavy_atoms_only': True,   # Flag to indicate hydrogens are excluded
-            'water_bfactor_filtered': max_water_bfactor is not None,  # Flag to indicate water filtering applied
-            'backbone_treatment': backbone_treatment,  # Flag to indicate backbone treatment applied
-            'coordination_distance': coordination_distance  # Store coordination distance used
+            'complete_residues': True,
+            'heavy_atoms_only': True,
+            'water_bfactor_filtered': max_water_bfactor is not None,
+            'backbone_treatment': backbone_treatment,
+            'coordination_distance': coordination_distance,
+            'n_unresolved_removed': 0  # Placeholder, filled by caller
         }
+
+    def _count_unresolved_in_site(self,
+                                metal_cluster: List[Dict],
+                                original_chains: Dict,
+                                unresolved_residues: set,
+                                cutoff_distance: float) -> int:
+        """Count how many unresolved residues would have been in the metal site.
+        
+        Args:
+            metal_cluster: List of metal atoms in cluster
+            original_chains: Original chains before unresolved removal
+            unresolved_residues: Set of unresolved residue keys
+            cutoff_distance: Distance cutoff for site inclusion
+            
+        Returns:
+            Number of unresolved residues within cutoff distance
+        """
+        unresolved_in_site = set()
+        
+        # For each unresolved residue, check if any atom would be in site
+        for res_key in unresolved_residues:
+            chain_id, res_num, res_name = res_key
+            
+            # Find atoms from this residue in original chains
+            if chain_id in original_chains:
+                chain = original_chains[chain_id]
+                for atom_key, atom in chain.atoms.items():
+                    # Check if this atom belongs to the unresolved residue
+                    if (atom_key[0] == chain_id and 
+                        atom_key[1] == res_num and 
+                        atom_key[2] == res_name and
+                        atom.element > 1):  # Heavy atoms only
+                        
+                        atom_coords = np.array(atom.xyz)
+
+                        # don't consider this one if its the unrewsolved atom
+                        if np.allclose(atom_coords, [0.0, 0.0, 0.0], atol=1e-6) and abs(atom.bfac) < 1e-6:
+                            continue
+                        
+                        # Check distance to any metal in cluster
+                        min_dist = min(
+                            np.linalg.norm(atom_coords - np.array(m['coords']))
+                            for m in metal_cluster
+                        )
+                        
+                        if min_dist <= cutoff_distance:
+                            unresolved_in_site.add(res_key)
+                            break  # Found at least one atom in range, count residue
+        
+        return len(unresolved_in_site)
     
     def _apply_atom_limit(self,
                         nearby_residues: Dict,
