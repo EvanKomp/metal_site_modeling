@@ -133,6 +133,7 @@ class MetalSiteDataset:
                 max_co_amino_acids: Optional[int] = None,
                 min_sites_per_pdb: Optional[int] = None,
                 max_sites_per_pdb: Optional[int] = None,
+                max_unresolved_removed: Optional[int] = None,
 
                 # Debug parameter
                 debug_max_files: Optional[int] = None
@@ -203,6 +204,7 @@ class MetalSiteDataset:
         self.min_sites_per_pdb = min_sites_per_pdb
         self.max_sites_per_pdb = max_sites_per_pdb
         self._debug_max_files = debug_max_files
+        self.max_unresolved_removed = max_unresolved_removed
         
         if cif_folder is not None:
             # Parse from scratch
@@ -421,7 +423,8 @@ class MetalSiteDataset:
             'n_nucleotides': entity_counts.get('nucleotide', 0),
             'non_residue_non_metal_names': ','.join(sorted(non_residue_non_metal_entities)) if non_residue_non_metal_entities else '',
             'n_non_residue_non_metal': len(non_residue_non_metal_entities),
-            'coordination_distance': site_data.get('coordination_distance', 3.0)
+            'coordination_distance': site_data.get('coordination_distance', 3.0),
+            'n_unresolved_removed': site_data.get('n_unresolved_removed', None)
         }
     
     def _load_and_filter_metadata(self):
@@ -478,6 +481,9 @@ class MetalSiteDataset:
             mask &= self.metadata_df['n_coordinating_amino_acids'] >= self.min_co
         if self.max_co is not None:
             mask &= self.metadata_df['n_coordinating_amino_acids'] <= self.max_co
+
+        if self.max_unresolved_removed is not None:
+            mask &= self.metadata_df['n_unresolved_removed'].fillna(0) <= self.max_unresolved_removed
         
         # Filter by sites per PDB
         if self.min_sites_per_pdb is not None or self.max_sites_per_pdb is not None:
