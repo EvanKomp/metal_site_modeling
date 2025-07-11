@@ -1024,7 +1024,8 @@ class CIFParser:
             
             for res_key, residue in chain.residues.items():
                 if residue is None:
-                    pass
+                    continue
+
                 chain_res_key = (chain_id, res_key[0], residue.name)  # (chain_id, res_num, res_name)
                 if chain_res_key not in unresolved_residues:
                     filtered_residues[res_key] = residue
@@ -1097,6 +1098,7 @@ class CIFParser:
         
         if unresolved_residues:
             chains = self._remove_unresolved_residues(chains, unresolved_residues)
+
         
         metal_sites = []
         

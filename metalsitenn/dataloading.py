@@ -316,18 +316,21 @@ class MetalSiteDataset:
             chains, assemblies, covalent, meta = parser.parse(str(cif_path))
             
             # Extract metal sites
-            metal_sites = parser.get_metal_sites(
-                (chains, assemblies, covalent, meta),
-                cutoff_distance=parser_params.get('metal_site_radius', 5.0),
-                coordination_distance=parser_params.get('coordination_distance', 3.0),
-                merge_threshold=parser_params.get('metal_aggregation_distance', 10.0),
-                max_atoms_per_site=parser_params.get('max_atoms_per_site', None),
-                min_amino_acids=parser_params.get('min_residues_per_site', None),
-                min_coordinating_amino_acids=parser_params.get('min_coordinating_amino_acids', None),
-                skip_sites_with_entities=parser_params.get('skip_sites_with_entities', None),
-                max_water_bfactor=parser_params.get('max_water_bfactor', None),
-                backbone_treatment=parser_params.get('backbone_treatment', 'bound'),
-            )
+            try:
+                metal_sites = parser.get_metal_sites(
+                    (chains, assemblies, covalent, meta),
+                    cutoff_distance=parser_params.get('metal_site_radius', 5.0),
+                    coordination_distance=parser_params.get('coordination_distance', 3.0),
+                    merge_threshold=parser_params.get('metal_aggregation_distance', 10.0),
+                    max_atoms_per_site=parser_params.get('max_atoms_per_site', None),
+                    min_amino_acids=parser_params.get('min_residues_per_site', None),
+                    min_coordinating_amino_acids=parser_params.get('min_coordinating_amino_acids', None),
+                    skip_sites_with_entities=parser_params.get('skip_sites_with_entities', None),
+                    max_water_bfactor=parser_params.get('max_water_bfactor', None),
+                    backbone_treatment=parser_params.get('backbone_treatment', 'bound'),
+                )
+            except Exception as e:
+                raise ValueError(f"Failed to extract metal sites from {cif_path}: {e}")
             
             if not metal_sites:
                 return []
