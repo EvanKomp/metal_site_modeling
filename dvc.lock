@@ -241,6 +241,14 @@ stages:
   1.1_parse_sites_metadata:
     cmd: python pipeline/1/1.1_parse_sites_metadata.py
     deps:
+    - path: metalsitenn/dataloading.py
+      hash: md5
+      md5: af73e042483061ef5d8b96939b71a231
+      size: 28173
+    - path: metalsitenn/placer_modules/cifutils.py
+      hash: md5
+      md5: 9fcf1fad3e0b192b3b3509cb61da4788
+      size: 104361
     - path: pipeline/1/1.1_parse_sites_metadata.py
       hash: md5
       md5: bec36ddce485671839ec375c52231b5d
@@ -320,6 +328,6 @@ stages:
     outs:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: d7cc8b86fe10063b3d6e31849b00dcab.dir
-      size: 607716422
-      nfiles: 43806
+      md5: 0bb216ff3796a8d09ad4c43de2bd2c33.dir
+      size: 600075919
+      nfiles: 43584
