@@ -14,6 +14,7 @@ import re
 import copy
 import collections
 import random
+from pathlib import Path
 from openbabel import openbabel
 import itertools
 from typing import Dict,List, Union, Tuple
@@ -32,6 +33,7 @@ import pdbx
 from pdbx.reader.PdbxReader import PdbxReader
 from metalsitenn.placer_modules import obutils
 from metalsitenn.constants import RESNAME_3LETTER
+from metalsitenn.constants import I2E
 
 import logging
 logger = logging.getLogger(__name__)
@@ -485,6 +487,8 @@ class CIFParser:
                 reader = PdbxReader(cif)
                 reader.read(data)
         data = data[0]
+        filepath = Path(filename)
+        file_name_no_ext = filepath.stem
 
 
         ########################################################
@@ -857,7 +861,8 @@ class CIFParser:
             meta = {
                 'method' : data.getObj('exptl').getValue('method',0).replace(' ','_'),
                 'date' : data.getObj('pdbx_database_status').getValue('recvd_initial_deposition_date',0),
-                'resolution' : res
+                'resolution' : res,
+                'id': file_name_no_ext,
             }
         except AttributeError:
             meta = None
@@ -1061,7 +1066,9 @@ class CIFParser:
                     min_amino_acids: int = None,
                     min_coordinating_amino_acids: int = None,
                     max_water_bfactor: float = None,
-                    backbone_treatment: str = 'bound') -> List[Dict]:
+                    backbone_treatment: str = 'bound',
+                    edqualitymapper: 'EDQualityMapper' = None
+                    ) -> List[Dict]:
         """Extract metal binding sites from protein structure with unresolved atom handling.
         
         Args:
@@ -1092,7 +1099,6 @@ class CIFParser:
             chains, assemblies, covalent, meta = parsed_data
 
         # remove all
-        
         unresolved_residues = self._detect_unresolved_residues(chains)
         original_chains_with_unresolved = copy.deepcopy(chains)  # Keep copy with unresolved
         
@@ -1128,7 +1134,6 @@ class CIFParser:
                 max_atoms_per_site, max_water_bfactor, backbone_treatment
             )
             if site_data:
-                # NEW: Count unresolved residues that would have been in this site
                 unresolved_count = self._count_unresolved_in_site(
                     cluster, original_chains_with_unresolved, unresolved_residues, cutoff_distance
                 )
@@ -1137,7 +1142,18 @@ class CIFParser:
                 # Apply post-processing filters
                 if self._should_include_site(site_data, skip_sites_with_entities, min_amino_acids, min_coordinating_amino_acids):
                     metal_sites.append(site_data)
-        
+
+                    # Update site data with original file metadata
+                    site_data['id'] = meta['id'] if meta else 'unknown'
+                    site_data['resolution'] = meta.get('resolution', None) if meta else None
+                    site_data['max_rczd'] = None
+
+                    # check metal site for quality
+                    if edqualitymapper is not None:
+                        site_data['max_rczd'] = self._get_max_rczd(
+                            site_data, edqualitymapper
+                        )
+
         return metal_sites
     
     def _should_include_site(self, 
@@ -1899,6 +1915,61 @@ class CIFParser:
             filtered_bonds.append(bond)
         
         return filtered_atoms, filtered_bonds
+    
+    def _get_max_rczd(self, site_data: Dict, edqualitymapper: 'EDQualityMapping') -> float:
+        """
+        Get maximum RSZD (electron density quality) value for metals in the site.
+        
+        Args:
+            site_data: Dictionary containing metal site information with 'metal_atoms' and 'id'
+            edqualitymapper: EDQualityMapping instance for quality assessment
+            
+        Returns:
+            Optional[float]: Maximum RSZD value observed for metals in site, None if no quality data found
+        """
+        # Get PDB ID from site metadata
+        pdb_id = site_data.get('id')
+        if not pdb_id:
+            logger.warning("No PDB ID available for metal quality assessment")
+            return None
+        
+        # Extract metal atoms from site data
+        metal_atoms = site_data.get('metal_atoms', [])
+        if not metal_atoms:
+            logger.debug(f"No metal atoms found in site for PDB {pdb_id}")
+            return None
+        
+        # Collect RSZD values for all metals in site
+        rszd_values = []
+        
+        for metal_atom_data in metal_atoms:
+            # Extract metal information
+            atom = metal_atom_data.get('atom')
+            if not atom:
+                continue
+                
+            # Get element symbol from atomic number
+            element_symbol = I2E.get(atom.element, 'UNK')
+            
+            if element_symbol == 'UNK':
+                continue
+            
+            # Get coordinates
+            coordinates = atom.xyz
+            coord_tuple = (float(coordinates[0]), float(coordinates[1]), float(coordinates[2]))
+            
+            # Query the quality mapping
+            quality_entry = edqualitymapper.get_metal_quality(
+                pdb_id=pdb_id,
+                metal_symbol=element_symbol,
+                coordinates=coord_tuple
+            )
+            
+            if quality_entry is not None:
+                rszd_values.append(quality_entry.rszd)
+        
+        # Return maximum RSZD value if any found, otherwise None
+        return max(rszd_values) if rszd_values else None
 
 
     def clean_metal_bonding_patterns(self, chain: 'Chain') -> 'Chain':

@@ -1,4 +1,14 @@
 stages:
+
+  1.0_construct_edquality_mapper:
+    cmd: python pipeline/1/1.0_construct_edquality_mapper.py
+    params:
+    - data.source
+    deps:
+    - data/edstats_pdb_quality.csv
+    outs:
+    - data/edquality_mapper_cache
+
   1.1_parse_sites_metadata:
     cmd: python pipeline/1/1.1_parse_sites_metadata.py
     params:
@@ -19,6 +29,7 @@ stages:
     - pipeline/1/1.1_parse_sites_metadata.py
     - metalsitenn/dataloading.py
     - metalsitenn/placer_modules/cifutils.py
+    - data/edquality_mapper_cache
     outs:
     - data/1/1.1_parse_sites_metadata
 
