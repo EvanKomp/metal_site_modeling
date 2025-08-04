@@ -20,6 +20,8 @@ data:
   min_residues_per_site: 3 # Minimum number of residues in a site to consider it valid
   max_water_bfactor: 18
   n_cores: 104
+  max_rczd: 6.0 # Maximum sigma to be considered a properly labeled metal
+  max_res: 3.0 # Maximum resolution for site to be considered
   
   test_frac: 0.05 # Fraction of data to use for testing
 

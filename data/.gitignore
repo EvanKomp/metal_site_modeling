@@ -1,3 +1,5 @@
 /site_labels.csv
 /training_avg_num_neighbors.json
 /model_pretraining
+/edstats_pdb_quality.csv
+/edquality_mapper_cache

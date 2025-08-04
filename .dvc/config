@@ -1,6 +1,7 @@
 [core]
     site_cache_dir = /projects/metalsitenn/tmp/dvctmp
     remote = metalremote
+    autostage = true
 [cache]
     type = "hardlink,reflink,copy"
 ['remote "metalremote"']

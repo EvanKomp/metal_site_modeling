@@ -1,0 +1,5 @@
+outs:
+- md5: a4d441291c5c6e0dbee1f637a79374c7
+  size: 14187832
+  hash: md5
+  path: edstats_pdb_quality.csv

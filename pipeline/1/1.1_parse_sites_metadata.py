@@ -17,6 +17,7 @@ import multiprocessing
 
 from metalsitenn.utils import ParamsObj, make_jsonable
 from metalsitenn.dataloading import MetalSiteDataset
+from metalsitenn.edquality import EDQualityMapping
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,14 @@ def main():
     
     # Initialize dataset (this will do the parsing and caching)
     try:
+        # load the edmapper
+        mapper = EDQualityMapping(
+            csv_path='./data/edstats_pdb_quality.csv',
+            cache_path='./data/edquality_mapper_cache',
+            cif_folder=PARAMS.data.source,
+            coordinate_tolerance=0.1)
+
+
         dataset = MetalSiteDataset(
             cif_folder=PARAMS.data.source,
             cache_folder=output_dir,
@@ -77,6 +86,9 @@ def main():
             max_water_bfactor=PARAMS.data.max_water_bfactor,
             backbone_treatment=PARAMS.data.backbone_treatment,
             skip_entities=PARAMS.data.remove_entities,
+
+            # for getting rczd
+            edquality_mapper=mapper,
             
             n_cores=n_cores,
             
