@@ -1031,7 +1031,7 @@ class CIFParser:
                 if residue is None:
                     continue
 
-                chain_res_key = (chain_id, res_key[0], residue.name)  # (chain_id, res_num, res_name)
+                chain_res_key = (chain_id, res_key, residue.name)  # (chain_id, res_num, res_name)
                 if chain_res_key not in unresolved_residues:
                     filtered_residues[res_key] = residue
                 else:
@@ -1390,15 +1390,26 @@ class CIFParser:
                                     break
         
         # Create new chain with only the binding site
-        site_chain = self._create_site_chain(
+        site_chain, old_to_new_resid = self._create_site_chain(
             metal_cluster, nearby_residues, nearby_atoms, chains, backbone_treatment
         )
+
+        coordinating_residues_new = []
+        for res_key in coordinating_residues:
+            if res_key in old_to_new_resid:
+                new_res_key = old_to_new_resid[res_key]
+                new_res_key = (site_chain.id, new_res_key, res_key[2])
+                coordinating_residues_new.append(new_res_key)
+            else:
+                raise ValueError(
+                    f"Coordinating residue {res_key} not found in new site chain"
+                )
         
         return {
             'metal_atoms': metal_cluster,
             'center': center,
             'nearby_residues': nearby_residues,
-            'coordinating_residues': coordinating_residues,
+            'coordinating_residues': coordinating_residues_new,
             'site_chain': site_chain,
             'n_metals': len(metal_cluster),
             'n_residues': len(nearby_residues),
@@ -1583,6 +1594,7 @@ class CIFParser:
         # Create mapping from old atom keys to new atom keys
         old_to_new_atom_key = {}
         new_to_old_atom_key = {}
+        old_to_new_resid = {}
         
         # Create site-specific residue objects with renumbering
         site_residues = {}
@@ -1642,8 +1654,10 @@ class CIFParser:
                     planars=original_res.planars,              # Will be updated below
                     alternatives=original_res.alternatives
                 )
-                
+
+                old_to_new_resid[res_key] = str(new_res_num)
                 new_res_num += 1
+                
         
         # Filter inter-residue bonds to site (heavy atoms only) and update keys
         for chain in original_chains.values():
@@ -1793,7 +1807,7 @@ class CIFParser:
             automorphisms=site_automorphisms  # Preserved and remapped from original chains
         )
         
-        return site_chain
+        return site_chain, old_to_new_resid
     
     def _should_exclude_water_residue(self, 
                                     res_key: Tuple[str, str, str], 
