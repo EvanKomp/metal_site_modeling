@@ -1394,6 +1394,9 @@ class CIFParser:
             metal_cluster, nearby_residues, nearby_atoms, chains, backbone_treatment
         )
 
+        # remove bonds, and other attributes of metals that are clearly wrong.
+        site_chain = self.clean_metal_bonding_patterns(site_chain)
+
         coordinating_residues_new = []
         for res_key in coordinating_residues:
             if res_key in old_to_new_resid:
@@ -1988,12 +1991,14 @@ class CIFParser:
 
     def clean_metal_bonding_patterns(self, chain: 'Chain') -> 'Chain':
         """
-        Clean metal bonding patterns by removing metal hybridization and bonds involving metals.
+        Clean metal bonding patterns by removing bonds, hybridization, and hydrogen counts
+        for all atoms in residues containing metals.
         
         This method:
-        1. Sets hybridization state to None for all metal atoms
-        2. Removes all bonds involving metal atoms  
-        3. Removes chirals and planars containing metal atoms
+        1. Identifies residues containing metal atoms
+        2. Sets hybridization to None and nhyd to 0 for all atoms in metal-containing residues
+        3. Removes all bonds involving atoms in metal-containing residues
+        4. Removes chirals and planars containing atoms from metal-containing residues
         
         Args:
             chain: Chain object to clean
@@ -2006,106 +2011,76 @@ class CIFParser:
         # Create a copy of the chain to avoid modifying the original
         cleaned_chain = copy.deepcopy(chain)
         
-        # Step 1: Identify metal atoms and set their hybridization to None
-        metal_atom_keys = set()
+        # Step 1: Identify residues containing metal atoms
+        metal_residue_keys = set()
+        metal_containing_atom_keys = set()
+        
         for atom_key, atom in cleaned_chain.atoms.items():
             if atom.metal:
-                metal_atom_keys.add(atom_key)
-                # Set hybridization to None for metal atoms
-                cleaned_chain.atoms[atom_key] = atom._replace(hyb=None)
+                # Get residue key: (chain_id, res_num, res_name)
+                res_key = (atom_key[0], atom_key[1], atom_key[2])
+                metal_residue_keys.add(res_key)
         
-        # Step 2: Remove bonds involving metal atoms
+        # Collect all atom keys from metal-containing residues
+        for atom_key, atom in cleaned_chain.atoms.items():
+            res_key = (atom_key[0], atom_key[1], atom_key[2])
+            if res_key in metal_residue_keys:
+                metal_containing_atom_keys.add(atom_key)
+        
+        # Step 2: Set hybridization to None and nhyd to 0 for all atoms in metal-containing residues
+        for atom_key in metal_containing_atom_keys:
+            atom = cleaned_chain.atoms[atom_key]
+            cleaned_chain.atoms[atom_key] = atom._replace(hyb=None, nhyd=0)
+        
+        # Step 3: Remove all bonds involving atoms from metal-containing residues
         cleaned_bonds = []
         for bond in cleaned_chain.bonds:
-            if bond.a not in metal_atom_keys and bond.b not in metal_atom_keys:
+            if bond.a not in metal_containing_atom_keys and bond.b not in metal_containing_atom_keys:
                 cleaned_bonds.append(bond)
         
-        # Step 3: Remove chirals containing metal atoms
+        # Step 4: Remove chirals containing atoms from metal-containing residues
         cleaned_chirals = []
         for chiral in cleaned_chain.chirals:
-            # Check if any atom in the chiral constraint is a metal
-            has_metal = any(atom_key in metal_atom_keys for atom_key in chiral)
-            if not has_metal:
+            has_metal_residue_atom = any(atom_key in metal_containing_atom_keys for atom_key in chiral)
+            if not has_metal_residue_atom:
                 cleaned_chirals.append(chiral)
         
-        # Step 4: Remove planars containing metal atoms
+        # Step 5: Remove planars containing atoms from metal-containing residues
         cleaned_planars = []
         for planar in cleaned_chain.planars:
-            # Check if any atom in the planar constraint is a metal
-            has_metal = any(atom_key in metal_atom_keys for atom_key in planar)
-            if not has_metal:
+            has_metal_residue_atom = any(atom_key in metal_containing_atom_keys for atom_key in planar)
+            if not has_metal_residue_atom:
                 cleaned_planars.append(planar)
         
-        # Step 5: Clean automorphisms - remove groups containing metal atoms
+        # Step 6: Clean automorphisms - remove groups containing atoms from metal-containing residues
         cleaned_automorphisms = []
         for auto_group in cleaned_chain.automorphisms:
             cleaned_auto_group = []
             for auto_set in auto_group:
-                # Check if any atom in this automorphism set is a metal
-                has_metal = any(atom_key in metal_atom_keys for atom_key in auto_set)
-                if not has_metal:
+                has_metal_residue_atom = any(atom_key in metal_containing_atom_keys for atom_key in auto_set)
+                if not has_metal_residue_atom:
                     cleaned_auto_group.append(auto_set)
             
-            # Only keep automorphism groups that still have meaningful content
             if cleaned_auto_group:
                 cleaned_automorphisms.append(cleaned_auto_group)
         
-        # Step 6: Update residue-level bonding patterns
+        # Step 7: Update residue-level bonding patterns for metal-containing residues
         cleaned_residues = {}
         for res_pos, residue in cleaned_chain.residues.items():
             if residue is not None:
-                # Clean bonds within this residue
-                residue_bonds = []
-                for bond in residue.bonds:
-                    # Create full atom keys for this residue
-                    full_a_key = (cleaned_chain.id, res_pos, residue.name, bond.a)
-                    full_b_key = (cleaned_chain.id, res_pos, residue.name, bond.b)
-                    
-                    if full_a_key not in metal_atom_keys and full_b_key not in metal_atom_keys:
-                        residue_bonds.append(bond)
+                res_key = (cleaned_chain.id, res_pos, residue.name)
                 
-                # Clean chirals within this residue
-                residue_chirals = []
-                for chiral in residue.chirals:
-                    # Create full atom keys for this residue
-                    full_chiral_keys = [(cleaned_chain.id, res_pos, residue.name, atom_name) 
-                                    for atom_name in chiral]
-                    has_metal = any(key in metal_atom_keys for key in full_chiral_keys)
-                    if not has_metal:
-                        residue_chirals.append(chiral)
-                
-                # Clean planars within this residue
-                residue_planars = []
-                for planar in residue.planars:
-                    # Create full atom keys for this residue
-                    full_planar_keys = [(cleaned_chain.id, res_pos, residue.name, atom_name) 
-                                    for atom_name in planar]
-                    has_metal = any(key in metal_atom_keys for key in full_planar_keys)
-                    if not has_metal:
-                        residue_planars.append(planar)
-                
-                # Clean automorphisms within this residue
-                residue_automorphisms = []
-                for auto_group in residue.automorphisms:
-                    cleaned_auto_group = []
-                    for auto_set in auto_group:
-                        # Create full atom keys for this residue
-                        full_auto_keys = [(cleaned_chain.id, res_pos, residue.name, atom_name) 
-                                        for atom_name in auto_set]
-                        has_metal = any(key in metal_atom_keys for key in full_auto_keys)
-                        if not has_metal:
-                            cleaned_auto_group.append(auto_set)
-                    
-                    if cleaned_auto_group:
-                        residue_automorphisms.append(cleaned_auto_group)
-                
-                # Update the residue with cleaned bonding patterns
-                cleaned_residues[res_pos] = residue._replace(
-                    bonds=residue_bonds,
-                    chirals=residue_chirals,
-                    planars=residue_planars,
-                    automorphisms=residue_automorphisms
-                )
+                if res_key in metal_residue_keys:
+                    # For metal-containing residues, remove all bonds, chirals, planars
+                    cleaned_residues[res_pos] = residue._replace(
+                        bonds=[],  # Remove all intra-residue bonds
+                        chirals=[],  # Remove all chirals
+                        planars=[],  # Remove all planars
+                        automorphisms=[]  # Remove all automorphisms
+                    )
+                else:
+                    # For non-metal residues, keep original bonding patterns
+                    cleaned_residues[res_pos] = residue
             else:
                 cleaned_residues[res_pos] = residue
         
@@ -2115,7 +2090,7 @@ class CIFParser:
             type=cleaned_chain.type,
             sequence=cleaned_chain.sequence,
             residues=cleaned_residues,
-            atoms=cleaned_chain.atoms,  # Already updated in step 1
+            atoms=cleaned_chain.atoms,  # Already updated in step 2
             bonds=cleaned_bonds,
             chirals=cleaned_chirals,
             planars=cleaned_planars,

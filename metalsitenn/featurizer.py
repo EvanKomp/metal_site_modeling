@@ -16,6 +16,9 @@ from metalsitenn.constants import I2E
 
 from metalsitenn.graph_data import ProteinData, make_top_k_graph
 
+DEFAULT_FLOAT = torch.float32
+DEFAULT_INT = torch.int32
+
 class MetalSiteFeaturizer:
     """
     Featurizer for metal sites - converts Chain objects into tokenized graphs and assigns them to ProteinData objects.
@@ -59,5 +62,403 @@ class MetalSiteFeaturizer:
                 raise ValueError(f"Bond feature '{feature}' tokenizer must have non_bonded_token_id attribute")
             
         self.k = k
+
+    def _process_atom_features(self, chain: Chain, pdata: ProteinData, **kwargs) -> ProteinData:
+        """Assign atom based features to the ProteinData object."""
+
+        # dynamic data structure
+        temp_dict = {
+            'atom_name': [],
+            'atom_resname': [],
+            'atom_resid': [],
+            'atom_ishetero': [],
+        }
+        for feature_name in self.atom_features:
+            temp_dict[feature_name] = []
+
+        for atom_key in chain.atoms.keys():
+            # update non modelable atom features
+            temp_dict['atom_name'].append(atom_key[3])
+            temp_dict['atom_resname'].append(atom_key[2])
+            temp_dict['atom_resid'].append(atom_key[1])
+            
+            atom = chain.atoms[atom_key]
+            temp_dict['atom_ishetero'].append(atom.hetero)
+
+            # now add values for each feature if present
+            for feature_name in self.atom_features:
+                tokenizer = self.tokenizers[feature_name]
+                if feature_name == 'element':
+                    symbol = I2E.get(atom.element, 'X')
+                    value = tokenizer.encode(symbol, **kwargs)
+                elif feature_name == 'charge':
+                    value = tokenizer.encode(atom.charge, **kwargs)
+                elif feature_name == 'nhyd':
+                    value = tokenizer.encode(atom.nhyd, **kwargs)
+                elif feature_name == 'hyb':
+                    value = tokenizer.encode(atom.hyb, **kwargs)
+                else:
+                    raise ValueError(f"Unknown atom feature: {feature_name}")
+                
+                temp_dict[feature_name].append(value)
+
+        # convert to tensors and assign if possible
+        for key, values in temp_dict.items():
+            if not hasattr(pdata, key):
+                raise ValueError(f"ProteinData does not have attribute '{key}' to assign atom features")
+            # convert the featurized values to a tensor
+            if key in self.atom_features:
+                values = torch.tensor(values, dtype=DEFAULT_INT).unsqueeze(-1)  # [N, 1]
+            else:
+                pass
+
+            setattr(pdata, key, values)
+
+        return chain, pdata
+    
+    def _compute_hop_distances(self, chain: Chain, atom_to_idx: Dict[Tuple, int]) -> torch.Tensor:
+        """
+        Compute hop distances between atoms in the chain using NetworkX.
+        Returns a tensor of shape (N, N) where N is the number of atoms.
+        """
+        n_atoms = len(chain.atoms)
+        # Initialize matrix with non-bonded tokens (distance > 7 or disconnected)
+        distance_matrix = torch.full((n_atoms, n_atoms), 0, dtype=DEFAULT_INT)
+        
+        # Build NetworkX graph
+        G = nx.Graph()
+        G.add_edges_from([(bond.a, bond.b) for bond in chain.bonds])
+        
+        # Compute all-pairs shortest path lengths with cutoff=7
+        try:
+            distances = dict(nx.all_pairs_shortest_path_length(G, cutoff=7))
+        except nx.NetworkXError:
+            # Handle case where graph is empty
+            return distance_matrix
+        
+        # Fill distance matrix
+        for atom_a, paths in distances.items():
+            if atom_a not in atom_to_idx:
+                continue
+            i = atom_to_idx[atom_a]
+            
+            for atom_b, distance in paths.items():
+                if atom_b not in atom_to_idx:
+                    continue
+                j = atom_to_idx[atom_b]
+                
+                distance_matrix[i, j] = distance
+        
+        return distance_matrix
+    
+    def _assign_graph(self, chain: Chain, pdata: ProteinData, atom_to_idx: Dict[Tuple, int]) -> ProteinData:
+        """
+        Create a graph from the chain and assign it to the ProteinData object.
+        The graph is created using the make_top_k_graph function.
+        """
+        hop_distances = self._compute_hop_distances(chain, atom_to_idx) # [N, N]
+
+        r = torch.tensor([atom.xyz for atom in chain.atoms.values()], dtype=DEFAULT_FLOAT)
+        setattr(pdata, 'positions', r)
+
+        src, dst, R = make_top_k_graph(
+            r=r,
+            hop_distances=hop_distances,
+            k=self.k
+        )
+        edge_index = torch.stack([src, dst], dim=1)  # [E, 2]
+
+        # also extract distances from the 2D distance matrix
+        distances = R[src, dst].unsqueeze(-1)  # [E, 1]
+
+        # assign to ProteinData
+        pdata.distances = distances
+        pdata.edge_index = edge_index
+
+        return pdata
+    
+    def _process_bond_features(self, chain: Chain, pdata: ProteinData, atom_to_idx: Dict[Tuple, int], **kwargs) -> ProteinData:
+        """Assign bond based features to the ProteinData object."""
+        for bond in chain.bonds:
+            if bond.a not in atom_to_idx or bond.b not in atom_to_idx:
+                raise ValueError(f"Bond {bond} contains atoms not in atom_to_idx mapping")
+        n_atoms = len(atom_to_idx)
+
+        # here we will keep track of a 2D matrix at first and then use edge index to get the
+        # long form tensors
+        temp_dict = {}
+        for feature_name in self.bond_features:
+            tokenizer = self.tokenizers[feature_name]
+            temp_dict[feature_name] = torch.full(
+                (n_atoms, n_atoms),
+                tokenizer.non_bonded_token_id,  # fill with non-bonded token id to start
+                dtype=DEFAULT_INT
+            )
+
+        # process each bond for each feature
+        for bond in chain.bonds:
+            i, j = atom_to_idx[bond.a], atom_to_idx[bond.b]
+            for feature_name in self.bond_features:
+                tokenizer = self.tokenizers[feature_name]
+                if feature_name == 'bond_order':
+                    value = tokenizer.encode(bond.order, **kwargs)
+                elif feature_name == 'is_aromatic':
+                    value = tokenizer.encode(int(bond.aromatic), **kwargs)
+                elif feature_name == 'is_in_ring':
+                    value = tokenizer.encode(int(bond.in_ring), **kwargs)
+                else:
+                    raise ValueError(f"Unknown bond feature: {feature_name}")
+                
+                # set symmetric values
+                temp_dict[feature_name][i, j] = value
+                temp_dict[feature_name][j, i] = value  # symmetric
+
+        # cut out the edge tokens from the 2D matrix
+        edge_index = pdata.edge_index
+        for key, values in temp_dict.items():
+            if not hasattr(pdata, key):
+                raise ValueError(f"ProteinData does not have attribute '{key}' to assign bond features")
+            # convert the featurized values to a tensor
+            values = values[edge_index[:, 0], edge_index[:, 1]].unsqueeze(-1)  # [E, 1]
+            setattr(pdata, key, values)
+
+        return pdata
+    
+    def _find_all_paths_of_length_n(self, G: nx.Graph, atom_to_idx: Dict, n: int) -> List[List[int]]:
+        """
+        Find all paths of length n in NetworkX graph and return as atom indices.
+        Adapted from ChemNet's approach.
+        
+        Args:
+            G: NetworkX graph of molecular connectivity
+            atom_to_idx: Mapping from atom keys to indices  
+            n: Path length (2 for angles, 3 for torsions)
+            
+        Returns:
+            List of paths as atom index lists
+        """
+        def findPaths(G, u, n):
+            if n == 0:
+                return [[u]]
+            paths = [[u] + path for neighbor in G.neighbors(u) 
+                    for path in findPaths(G, neighbor, n - 1) if u not in path]
+            return paths
+        
+        # Find all paths of length n
+        allpaths = []
+        for node in G.nodes():
+            paths = findPaths(G, node, n)
+            for path in paths:
+                # Convert atom keys to indices
+                indices = [atom_to_idx[atom_key] for atom_key in path if atom_key in atom_to_idx]
+                if len(indices) == n + 1:  # Path of length n has n+1 nodes
+                    # Canonicalize path direction (smallest index first or last)
+                    if indices[0] > indices[-1]:
+                        indices = indices[::-1]
+                    allpaths.append(tuple(indices))
+        
+        # Remove duplicates and sort
+        unique_paths = list(set(allpaths))
+        unique_paths.sort()
+        
+        return [list(path) for path in unique_paths]
+
+    def _get_topology(self, chain: Chain, pdata: ProteinData, atom_to_idx: Dict[Tuple, int]) -> ProteinData:
+        """
+        Extract topology information from the chain needed for computing constrain gradients.
+
+        Returns:
+        Dictionary containing:
+        - 'bonds': (N_bonds, 2) tensor of atom index pairs
+        - 'bond_lengths': (N_bonds,) tensor of bond lengths 
+        - 'angles': (N_angles, 3) tensor of bonded angle triplets
+        - 'torsions': (N_torsions, 4) tensor of bonded torsion quadruplets
+        - 'chirals': (N_chirals, 4) tensor of chiral center atom indices
+        - 'planars': (N_planars, 4) tensor of planar center atom indices
+        - 'frames': (N_frames, 3) tensor of angle triplets for FAPE calculation
+        - 'permuts': List[torch.Tensor] - automorphism permutation groups
+
+        NOTE: N_bonds != E, we will store topology in aggregated into a dict to avoid confusion with
+        other attributes like edge distances. This dict is ONLY used for computing constraints and gradients.
+
+        NOTE: Only bonds, bond lengths, planars, and chirals are currently used for gradients - the others can be used in chemnet like losses
+        """
+        result = {}
+            
+        # Extract bonds
+        bond_pairs = []
+        bond_lengths = []
+        
+        for bond in chain.bonds:
+            if bond.a in atom_to_idx and bond.b in atom_to_idx:
+                i, j = atom_to_idx[bond.a], atom_to_idx[bond.b]
+                bond_pairs.append([i, j])
+                bond_lengths.append(bond.length)
+        
+        if bond_pairs:
+            result['bonds'] = torch.tensor(bond_pairs, dtype=torch.long)
+            result['bond_lengths'] = torch.tensor(bond_lengths, dtype=torch.float32)
+        else:
+            result['bonds'] = torch.empty((0, 2), dtype=torch.long)
+            result['bond_lengths'] = torch.empty((0,), dtype=torch.float32)
+        
+        # Build NetworkX graph from bonds to find paths
+        G = nx.Graph()
+        atom_keys = list(atom_to_idx.keys())
+        G.add_nodes_from(atom_keys)
+        G.add_edges_from([(bond.a, bond.b) for bond in chain.bonds 
+                        if bond.a in atom_to_idx and bond.b in atom_to_idx])
+        
+        # Find all paths of length 2 (angles: i-j-k where j is central)
+        angles = self._find_all_paths_of_length_n(G, atom_to_idx, 2)
+        if angles:
+            result['angles'] = torch.tensor(angles, dtype=torch.long)
+        else:
+            result['angles'] = torch.empty((0, 3), dtype=torch.long)
+        
+        # Find all paths of length 3 (torsions: i-j-k-l)
+        torsions = self._find_all_paths_of_length_n(G, atom_to_idx, 3)
+        if torsions:
+            result['torsions'] = torch.tensor(torsions, dtype=torch.long)
+        else:
+            result['torsions'] = torch.empty((0, 4), dtype=torch.long)
+        
+        # Extract chirals - (o,i,j,k) tuples where o is central atom, i,j,k are neighbors
+        chiral_groups = []
+        for chiral in chain.chirals:
+            # Each chiral is a list of 4 atom keys: [center, neighbor1, neighbor2, neighbor3]
+            if len(chiral) == 4 and all(atom_key in atom_to_idx for atom_key in chiral):
+                chiral_indices = [atom_to_idx[atom_key] for atom_key in chiral]
+                chiral_groups.append(chiral_indices)
+        
+        if chiral_groups:
+            result['chirals'] = torch.tensor(chiral_groups, dtype=torch.long)
+        else:
+            result['chirals'] = torch.empty((0, 4), dtype=torch.long)
+        
+        # Extract planars - (o,i,j,k) tuples where o is central sp2 atom, i,j,k are neighbors
+        planar_groups = []
+        for planar in chain.planars:
+            # Each planar is a list of 4 atom keys: [center, neighbor1, neighbor2, neighbor3] 
+            if len(planar) == 4 and all(atom_key in atom_to_idx for atom_key in planar):
+                planar_indices = [atom_to_idx[atom_key] for atom_key in planar]
+                planar_groups.append(planar_indices)
+        
+        if planar_groups:
+            result['planars'] = torch.tensor(planar_groups, dtype=torch.long)
+        else:
+            result['planars'] = torch.empty((0, 4), dtype=torch.long)
+        
+        # Extract automorphisms (permuts) - convert to atom indices and filter to observed atoms
+        permuts = []
+        observed_atoms = set(atom_to_idx.keys())
+        
+        for automorphism in chain.automorphisms:
+            if isinstance(automorphism, list) and len(automorphism) > 1:
+                # Convert each automorphism group to atom indices
+                # automorphism is a list of lists, where each inner list contains equivalent atoms
+                perm_group = []
+                for equiv_group in automorphism:
+                    if isinstance(equiv_group, list):
+                        # Only include atoms that are in our atom_to_idx mapping
+                        equiv_indices = [atom_to_idx[atom_key] for atom_key in equiv_group 
+                                    if atom_key in atom_to_idx]
+                        if len(equiv_indices) > 1:  # Only meaningful if >1 equivalent atoms
+                            perm_group.append(equiv_indices)
+                
+                if len(perm_group) > 0:
+                    # Each permutation group is a list of equivalent atom index lists
+                    # Convert to tensor format matching ChemNet's expectation
+                    max_group_size = max(len(group) for group in perm_group)
+                    if max_group_size > 1:
+                        # Pad groups to same size and create tensor
+                        padded_groups = []
+                        for group in perm_group:
+                            padded_group = group + [-1] * (max_group_size - len(group))
+                            padded_groups.append(padded_group)
+                        if padded_groups:
+                            permuts.append(torch.tensor(padded_groups, dtype=torch.long))
+        
+        result['permuts'] = permuts
+        
+        # Create frames for FAPE calculation (angles excluding automorphic atoms)
+        # Following ChemNet approach: exclude atoms that are part of automorphisms
+        skip_from_frames = set()
+        for perm_tensor in permuts:
+            if perm_tensor.numel() > 0:
+                # Get all atom indices from automorphism groups (excluding padding -1)
+                valid_indices = perm_tensor[perm_tensor >= 0]
+                skip_from_frames.update(valid_indices.tolist())
+        
+        # Filter angles to create frames, excluding automorphic atoms
+        frame_angles = []
+        for angle in angles:
+            if not any(idx in skip_from_frames for idx in angle):
+                frame_angles.append(angle)
+        
+        if frame_angles:
+            result['frames'] = torch.tensor(frame_angles, dtype=torch.long)
+        else:
+            result['frames'] = torch.empty((0, 3), dtype=torch.long)
+        
+        setattr(pdata, 'topology', result)
+        return pdata
+    
+    def featurize_one(self, chain: Chain, **kwargs) -> ProteinData:
+        """ Featurize a single Chain object into a ProteinData object.
+        Args:
+            chain: Chain object to featurize
+            **kwargs: Additional keyword arguments for tokenizers
+        Returns:
+            ProteinData object with featurized data
+        """
+        if not isinstance(chain, Chain):
+            raise ValueError("Input must be a Chain object")
+        
+        # Create a new ProteinData object
+        pdata = ProteinData()
+        
+        # Assign atom features
+        chain, pdata = self._process_atom_features(chain, pdata, **kwargs)
+        
+        # Create atom to index mapping
+        atom_to_idx = {atom_key: idx for idx, atom_key in enumerate(chain.atoms.keys())}
+        
+        # Assign graph structure
+        pdata = self._assign_graph(chain, pdata, atom_to_idx)
+        
+        # Assign bond features
+        pdata = self._process_bond_features(chain, pdata, atom_to_idx, **kwargs)
+        
+        # Extract topology information
+        pdata = self._get_topology(chain, pdata, atom_to_idx)
+        
+        return pdata
+    
+
+    def get_feature_vocab_sizes(self) -> Dict[str, int]:
+        """
+        Get vocabulary sizes for all configured features.
+        
+        Returns:
+            Dictionary mapping feature names to their vocabulary sizes
+        """
+        vocab_sizes = {}
+        
+        for feature_name in self.atom_features + self.bond_features:
+            tokenizer = self.tokenizers[feature_name]
+            vocab_sizes[feature_name] = tokenizer.vocab_size
+        
+        return vocab_sizes
+    
+    def __repr__(self) -> str:
+        """Return string representation of the featurizer."""
+        return (f"MetalSiteFeaturizer(atom_features={self.atom_features}, "
+                f"bond_features={self.bond_features})")
+
+            
+
+                
+        
 
     

@@ -555,7 +555,7 @@ class HydrogenCountTokenizer(Tokenizer):
     def __init__(self):
         """Initialize HydrogenCountTokenizer with hydrogen counts 0-4 and <MASK> token."""
         hydrogen_vocab = list(range(0, 5))  # [0, 1, 2, 3, 4]
-        super().__init__(hydrogen_vocab, error_on_unknown=True, use_mask=True)
+        super().__init__(hydrogen_vocab, error_on_unknown=False, use_mask=True)
 
 
 class HybdridizaitonTokenizer(Tokenizer):
@@ -595,7 +595,7 @@ class BondOrderTokenizer(Tokenizer):
         bond_order_vocab = list(range(0, 5))  # [1, 2, 3, 4]
         
         # Initialize parent tokenizer with error_on_unknown=True and use_mask=True
-        super().__init__(bond_order_vocab, error_on_unknown=False, use_mask=True)
+        super().__init__(bond_order_vocab, error_on_unknown=True, use_mask=True)
     
     @property
     def non_bonded_token_id(self) -> int:
