@@ -73,3 +73,11 @@ class ProteinData:
 
     # global features
     global_features: torch.Tensor=None  # [B, d]
+
+    # attributes related to collating / loss calculation
+    atom_masked_mask: torch.Tensor=None  # [N, 1] - mask for atoms that were masked
+    atom_masked_labels: torch.Tensor=None  # [N, 1] - labels
+    atom_loss_weights: torch.Tensor=None  # [N, 1] - loss weights for each atom
+
+    atom_noised_mask: torch.Tensor=None  # [N, 1] - mask for atoms that were noised
+    position_labels: torch.Tensor=None  # [N, 3] - labels for positions
