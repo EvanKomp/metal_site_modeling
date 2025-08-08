@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from typing import List, Tuple, Dict, Any
 import torch
+import numpy as np
 
 
 def make_top_k_graph(r, hop_distances, k=10):
@@ -55,11 +56,12 @@ class ProteinData:
     nhyd: torch.Tensor=None  # [N, 1]
     hyb: torch.Tensor=None  # [N, 1]
     positions: torch.Tensor=None  # [N, 3]
-    batch: torch.Tensor=None  # [N, 1] - used to identify which system the atom belongs to
+    atom_movable_mask: torch.Tensor=None  # [N, 1] - mask for atoms that can be moved. This should contain at least all indices in atom_noised_mask
+
     # for posterity
-    atom_name: List[str]=None  # [N, 1] - atom names
-    atom_resname: List[str]=None  # [N, 1] - residue names
-    atom_resid: List[int]=None  # [N, 1] - residue ids
+    atom_name: np.ndarray[str]=None  # [N, 1] - atom names
+    atom_resname: np.ndarray[str]=None  # [N, 1] - residue names
+    atom_resid: torch.Tensor=None  # [N, 1] - residue ids
     atom_ishetero: torch.Tensor=None  # [N, 1] - is hetero atom
 
     # edge info
@@ -79,30 +81,37 @@ class ProteinData:
 
     # global features
     global_features: torch.Tensor=None  # [B, d]
+    time: torch.Tensor=None  # [B, 1] - time of the system, if applicable
 
     # attributes related to collating / loss calculation
     atom_masked_mask: torch.Tensor=None  # [N, 1] - mask for atoms that were masked
-    atom_masked_labels: torch.Tensor=None  # [N, 1] - labels
-    atom_loss_weights: torch.Tensor=None  # [N, 1] - loss weights for each atom
-    edge_loss_weights: torch.Tensor=None  # [E, 1] - loss weights for each edge if doing edge prediction
+    element_labels: torch.Tensor=None  # [N, 1] - labels
+    element_loss_weights: torch.Tensor=None # [N, 1] - per atom weights for element loss
+
+    global_labels: torch.Tensor=None  # [B, d] - labels for global tasks
+    global_loss_weights: torch.Tensor=None  # [B, d] - per example weights for global tasks
 
     atom_noised_mask: torch.Tensor=None  # [N, 1] - mask for atoms that were noised
+    position_flow_labels: torch.Tensor=None  # [N, 3] - labels for positions in flow tasks
     position_labels: torch.Tensor=None  # [N, 3] - labels for positions
+    position_loss_weights: torch.Tensor=None  # [N, 3] - per atom weights for denoising loss
 
 
-    def to(self, device: str):
+    def __setattr__(self, name: str, value):
         """
-        Move all tensors in the ProteinData to the specified device.
+        Override setattr to invalidate distances when positions change.
         
         Args:
-            device (str): The device to move the tensors to (e.g., 'cpu', 'cuda').
+            name (str): Attribute name being set
+            value: Value being assigned
         """
-        for field in self.__dataclass_fields__:
-            value = getattr(self, field)
-            if isinstance(value, torch.Tensor):
-                setattr(self, field, value.to(device))
-            else:
-                pass
+        # Check if positions are being modified
+        if name == 'positions' and hasattr(self, 'distances') and self.distances is not None:
+            # Set distances to None before setting positions
+            object.__setattr__(self, 'distances', None)
+        
+        # Call parent setattr
+        object.__setattr__(self, name, value)
 
     def __repr__(self) -> str:
         """
@@ -121,4 +130,32 @@ class ProteinData:
                 repr_str += f"  {field}={value},\n"
         repr_str += ")"
         return repr_str
+    
+    def set_distances(self):
+        """
+        Calculate and set distances based on current positions.
+        
+        This method computes pairwise distances between atoms and sets the
+        `distances` attribute.
+        """
+        if self.positions is None or self.edge_index is None:
+            raise ValueError("Positions must be set before calculating distances.")
+        
+        # Compute pairwise distances
+        R = torch.cdist(self.positions, self.positions)
+        # Fill diagonal with zeros (self-distances)
+        R.fill_diagonal_(0.0)
+        # Store distances in the ProteinData object using edge index
+        src, dst = self.edge_index.t()
+        distances = R[src, dst].unsqueeze(-1)  # [E, 1]
+        self.distances = distances
+    
+
+class BatchProteinData:
+    """
+    Data class for a batch of ProteinData objects.
+    Contains a list of ProteinData objects and provides methods to access
+    individual ProteinData instances by index.
+    """
+    pass
             

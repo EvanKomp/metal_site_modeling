@@ -8,7 +8,7 @@
 import os
 
 
-COMMON_PROTEIN_ATOMS = {'C', 'N', 'H', 'D', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'Se'}
+COMMON_PROTEIN_ATOMS = {'C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I', 'Se'}
 ALL_METALS = {
     # Alkali metals (Group 1)
     'Li', 'Na', 'K', 'Rb', 'Cs', 'Fr',

@@ -2030,7 +2030,7 @@ class CIFParser:
         # Step 2: Set hybridization to None and nhyd to 0 for all atoms in metal-containing residues
         for atom_key in metal_containing_atom_keys:
             atom = cleaned_chain.atoms[atom_key]
-            cleaned_chain.atoms[atom_key] = atom._replace(hyb=None, nhyd=0)
+            cleaned_chain.atoms[atom_key] = atom._replace(hyb=None, nhyd=None)
         
         # Step 3: Remove all bonds involving atoms from metal-containing residues
         cleaned_bonds = []

@@ -8,8 +8,12 @@
 from typing import Union, List, Dict, Optional, Any
 import warnings
 import numpy as np
+import torch
 
 from metalsitenn.constants import COMMON_PROTEIN_ATOMS, ALL_METALS, BIOLOGICAL_METALS, PROTEIN_METALS, CRITICAL_METALS
+
+import logging
+logger = logging.getLogger(__name__)
 
 class Tokenizer:
     """
@@ -435,7 +439,302 @@ class ElementTokenizer(Tokenizer):
                 f"n_full_context_metals={len(self.full_context_metals)}, "
                 f"n_other_metals={len(self.other_metals)}, "
                 f"special_tokens={self.special_tokens})")
-        """Return string representation of ElementTokenizer."""
+        
+    # a couple more methods that help with handling metal specific collations
+    def get_metal_vocab(self, include_special_tokens: bool = True) -> Dict[str, int]:
+        """
+        Get vocabulary mapping for metal-related tokens only.
+        
+        Args:
+            include_special_tokens: If True, include <MASK>, <UNK>, <METAL> tokens
+            
+        Returns:
+            Dictionary mapping metal symbols/tokens to their indices
+        """
+        if not hasattr(self, '_metal_vocab'):
+            metal_vocab = {}
+            
+            # Add specific metals from full_context_metals
+            for metal in self.full_context_metals:
+                if metal in self.d2i:
+                    metal_vocab[metal] = self.d2i[metal]
+            
+            if include_special_tokens:
+                # Add special tokens relevant to metal prediction
+                for token in ['<MASK>', '<UNK>', '<METAL>']:
+                    if token in self.d2i:
+                        metal_vocab[token] = self.d2i[token]
+            self._metal_vocab = metal_vocab
+
+        return self._metal_vocab
+    
+    @property
+    def metal_token_ids(self) -> torch.Tensor:
+        """
+        Get cached tensor of all metal token IDs for efficient vectorized operations.
+        
+        Returns:
+            Tensor of token IDs for all metals (full_context_metals + <METAL> token)
+        """
+        if not hasattr(self, '_metal_token_ids'):
+            import torch
+            
+            metal_ids = []
+            
+            # Add all full_context_metals
+            for metal in self.full_context_metals:
+                if metal in self.d2i:
+                    metal_ids.append(self.d2i[metal])
+            
+            # Add <METAL> token
+            if '<METAL>' in self.d2i:
+                metal_ids.append(self.d2i['<METAL>'])
+            
+            self._metal_token_ids = torch.tensor(metal_ids, dtype=torch.long)
+        
+        return self._metal_token_ids
+    
+    def get_metal_vocab_size(self, include_special_tokens: bool = True) -> int:
+        """
+        Get the size of metal-only vocabulary.
+        
+        Args:
+            include_special_tokens: If True, include special tokens in count
+            
+        Returns:
+            Number of metal-related tokens
+        """
+        return len(self.get_metal_vocab(include_special_tokens))
+
+    def get_metal_label_indices(self, include_special_tokens: bool = True) -> List[int]:
+        """
+        Get ordered list of indices for metal-related tokens.
+        
+        This creates a consistent ordering for constructing label vectors where
+        index i in the returned list corresponds to position i in a count vector.
+        
+        Args:
+            include_special_tokens: If True, include <MASK>, <UNK>, <METAL> tokens
+        
+        Returns:
+            List of tokenizer indices for metal tokens, with consistent ordering
+        """
+        if not hasattr(self, "_metal_label_indices"):
+            metal_indices = []
+            
+            # Add special tokens first (consistent ordering)
+            if include_special_tokens:
+                for token in ['<UNK>', '<MASK>', '<METAL>']:
+                    if token in self.d2i:
+                        metal_indices.append(self.d2i[token])
+            
+            # Add full_context_metals in sorted order
+            sorted_metals = sorted(self.full_context_metals)
+            for metal in sorted_metals:
+                if metal in self.d2i:
+                    metal_indices.append(self.d2i[metal])
+            self._metal_label_indices = metal_indices
+            
+        return self._metal_label_indices
+    
+    def get_metal_labels_mapping(self, include_special_tokens: bool = True) -> Dict[str, int]:
+        """
+        Get mapping from metal tokens to their position in label vectors.
+        
+        Args:
+            include_special_tokens: If True, include special tokens in mapping
+        
+        Returns:
+            Dictionary mapping token -> label vector position
+        """
+        if not hasattr(self, "_metal_labels_mapping"):
+            labels_mapping = {}
+            position = 0
+            
+            # Add special tokens first
+            if include_special_tokens:
+                for token in ['<UNK>', '<MASK>', '<METAL>']:
+                    if token in self.d2i:
+                        labels_mapping[token] = position
+                        position += 1
+            
+            # Add full_context_metals in sorted order
+            sorted_metals = sorted(self.full_context_metals)
+            for metal in sorted_metals:
+                labels_mapping[metal] = position
+                position += 1
+            self._metal_labels_mapping = labels_mapping
+        
+        return self._metal_labels_mapping
+    
+    def encode_metal_composition_counts(self, metal_elements: List[str], include_special_tokens: bool = True) -> List[float]:
+        """
+        Encode metal composition as count vector from element symbols.
+        
+        Args:
+            metal_elements: List of metal symbols (can include duplicates)
+            include_special_tokens: If True, include special tokens in the label vector
+            
+        Returns:
+            Count vector with counts for each metal token (including special tokens if requested)
+        """
+        labels_mapping = self.get_metal_labels_mapping(include_special_tokens)
+        composition = [0.0] * len(labels_mapping)
+        
+        for metal in metal_elements:
+            if metal in labels_mapping:
+                pos = labels_mapping[metal]
+                composition[pos] += 1.0
+        
+        return composition
+    
+    def encode_metal_composition_counts_from_tokens(self, metal_token_ids: Union[List[int], torch.Tensor], include_special_tokens: bool = True) -> List[float]:
+        """
+        Encode metal composition as count vector from tokenized element IDs.
+        
+        Vectorized implementation using torch operations for efficiency.
+        Count vectors preserve stoichiometry and can be converted to multi-hot via (counts > 0).
+        
+        Args:
+            metal_token_ids: List or tensor of tokenized element IDs (from pdata.element, can include duplicates)
+            include_special_tokens: If True, include special tokens in the label vector
+            
+        Returns:
+            Count vector with counts for each metal token (including special tokens if requested)
+        """
+        
+        # Convert to tensor if not already
+        if not isinstance(metal_token_ids, torch.Tensor):
+            metal_token_ids = torch.tensor(metal_token_ids, dtype=torch.long)
+        
+        # Get ordered label indices (cached)
+        label_indices = self.get_metal_label_indices(include_special_tokens)
+        label_indices_tensor = torch.tensor(label_indices, dtype=torch.long)
+        
+        # Initialize count vector
+        composition = torch.zeros(len(label_indices), dtype=torch.float)
+        
+        # Only count tokens that are in our metal vocabulary
+        # Find which input tokens are in our metal label indices using isin
+        valid_mask = torch.isin(metal_token_ids, label_indices_tensor)
+        valid_tokens = metal_token_ids[valid_mask]
+        
+        if len(valid_tokens) > 0:
+            # Use bincount for efficient counting
+            # First, map token IDs to label positions
+            token_to_pos = {int(token_id): i for i, token_id in enumerate(label_indices)}
+            
+            # Map valid tokens to their positions in the composition vector
+            positions = torch.tensor([token_to_pos[int(token)] for token in valid_tokens], dtype=torch.long)
+            
+            # Use bincount to count occurrences at each position
+            counts = torch.bincount(positions, minlength=len(label_indices))
+            composition = counts.float()
+        
+        return composition
+    
+    def is_metal_element(self, element: Union[str, int]) -> bool:
+        """
+        Check if an element is a metal (either full_context or other_metals).
+        
+        Args:
+            element: Element symbol (str) or token ID (int)
+            
+        Returns:
+            True if element is a metal, False otherwise
+        """
+        if isinstance(element, int):
+            # Convert token ID to element symbol
+            if element in self.i2d:
+                element = self.i2d[element]
+            else:
+                return False
+        
+        return element in (self.full_context_metals | self.other_metals)
+    
+    def is_full_context_metal(self, element: Union[str, int]) -> bool:
+        """
+        Check if an element is a full_context_metal (has specific vocab entry).
+        
+        Args:
+            element: Element symbol (str) or token ID (int)
+            
+        Returns:
+            True if element is in full_context_metals, False otherwise
+        """
+        if isinstance(element, int):
+            if element in self.i2d:
+                element = self.i2d[element]
+            else:
+                return False
+        
+        return element in self.full_context_metals
+    
+    def get_metal_elements_from_indices(self, indices: List[int]) -> List[str]:
+        """
+        Convert token indices back to metal element symbols.
+        
+        Args:
+            indices: List of token indices
+            
+        Returns:
+            List of metal element symbols (excludes non-metals and special tokens)
+        """
+        metal_elements = []
+        
+        for idx in indices:
+            if idx in self.i2d:
+                element = self.i2d[idx]
+                if self.is_metal_element(element) and element not in ['<MASK>', '<UNK>', '<METAL>']:
+                    metal_elements.append(element)
+        
+        return metal_elements
+    
+    def decode_metal_composition_counts(self, count_vector: List[float], threshold: float = 0.5, include_special_tokens: bool = True) -> List[str]:
+        """
+        Decode count vector back to list of metal symbols with their counts.
+        
+        Args:
+            count_vector: Count vector for metal tokens
+            threshold: Minimum count threshold for including a token
+            include_special_tokens: Must match the setting used when encoding
+            
+        Returns:
+            List of metal symbols/tokens present above threshold
+        """
+        metals = []
+        labels_mapping = self.get_metal_labels_mapping(include_special_tokens)
+        
+        # Invert mapping: position -> token
+        pos_to_token = {pos: token for token, pos in labels_mapping.items()}
+        
+        for i, count in enumerate(count_vector):
+            if count > threshold and i in pos_to_token:
+                token = pos_to_token[i]
+                # Add token repeated by count
+                metals.extend([token] * int(count))
+        
+        return metals
+    
+    def get_metal_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about metal representation in the tokenizer.
+        
+        Returns:
+            Dictionary with metal vocabulary statistics
+        """
+        return {
+            'n_full_context_metals': len(self.full_context_metals),
+            'n_other_metals': len(self.other_metals),
+            'n_total_metals': len(self.full_context_metals) + len(self.other_metals),
+            'full_context_metals': sorted(self.full_context_metals),
+            'metal_vocab_size': self.get_metal_vocab_size(include_special_tokens=True),
+            'has_metal_token': '<METAL>' in self.d2i,
+            'metal_token_id': self.d2i.get('<METAL>', None)
+        }
+    
+
+
     
 
 class ChargeTokenizer(Tokenizer):

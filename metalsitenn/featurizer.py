@@ -5,16 +5,17 @@
 * Company: National Renewable Energy Lab, Bioeneergy Science and Technology
 * License: MIT
 '''
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Union
 import torch
+import numpy as np
 import networkx as nx
 import warnings
 
 from metalsitenn.tokenizers import TOKENIZERS, Tokenizer
 from metalsitenn.placer_modules.cifutils import Chain, mutate_chain
-from metalsitenn.constants import I2E
+from metalsitenn.constants import I2E, RESNAME_3LETTER
 
-from metalsitenn.graph_data import ProteinData, make_top_k_graph
+from metalsitenn.graph_data import ProteinData, BatchProteinData, make_top_k_graph
 
 DEFAULT_FLOAT = torch.float32
 DEFAULT_INT = torch.int32
@@ -36,6 +37,9 @@ class MetalSiteFeaturizer:
     - atom_features: List[str] - list of atom features to include in the featurization
     - bond_features: List[str] - list of bond features to include in the featurization
     - k: int - Number of atoms in each graph
+    - custom_tokenizers_init: Dict[str, Tokenizer] - custom tokenizers for specific features instead of the default ones.
+        eg. the metals that are modeled at full context can be changed in the ElementTokenizer which defaults to some set
+        raises ValueError if any of the requested features are not in the default dict
     """
     tokenizers = TOKENIZERS
 
@@ -43,8 +47,17 @@ class MetalSiteFeaturizer:
             self, 
             atom_features: List[str] = ['element'],
             bond_features: List[str] = ['bond_order'],
-            k: int = 20
+            k: int = 20,
+            custom_tokenizers_init: Dict[str, Tokenizer] = None
     ):
+        # reasign tokenizers if custom ones are provided
+        if custom_tokenizers_init is not None:
+            for feature, tokenizer in custom_tokenizers_init.items():
+                if feature not in self.tokenizers:
+                    raise ValueError(f"Custom tokenizer for feature '{feature}' is not recognized. "
+                                     f"Available features: {list(self.tokenizers.keys())}")
+                self.tokenizers[feature] = tokenizer
+
         # Validate all requested features exist
         all_features = atom_features + bond_features
         missing_features = [f for f in all_features if f not in self.tokenizers]
@@ -80,7 +93,7 @@ class MetalSiteFeaturizer:
             # update non modelable atom features
             temp_dict['atom_name'].append(atom_key[3])
             temp_dict['atom_resname'].append(atom_key[2])
-            temp_dict['atom_resid'].append(atom_key[1])
+            temp_dict['atom_resid'].append(int(atom_key[1]))
             
             atom = chain.atoms[atom_key]
             temp_dict['atom_ishetero'].append(atom.hetero)
@@ -109,8 +122,12 @@ class MetalSiteFeaturizer:
             # convert the featurized values to a tensor
             if key in self.atom_features:
                 values = torch.tensor(values, dtype=DEFAULT_INT).unsqueeze(-1)  # [N, 1]
+            elif key == 'atom_ishetero':
+                values = torch.tensor(values, dtype=torch.bool).unsqueeze(-1)  # [N, 1]
+            elif key == 'atom_resid':
+                values = torch.tensor(values, dtype=DEFAULT_INT).unsqueeze(-1)  # [N, 1]
             else:
-                pass
+                values = np.array(values, dtype=str).reshape(-1, 1)  # [N, 1] - string arrays
 
             setattr(pdata, key, values)
 
@@ -435,6 +452,485 @@ class MetalSiteFeaturizer:
         
         return pdata
     
+    def _collapse_and_noise_residues(
+        self,
+        pdata: ProteinData,
+        resid: Union[str, int, List[Union[str, int]]],
+        ca_fixed: bool=True,
+        center_atom_noise_sigma: float=0.5,
+        limb_atom_noise_sigma: float=0.2,
+        other_atom_noise_sigma: float=None,
+        time: Union[float, 'random', None] = None
+    ) -> ProteinData:
+        """Collapse a residue/s down to a point and noise the atoms, also assigning loss mask.
+
+        NOTE: For amino acids, the CA atom is always the center atom
+            For other residues, the atom is selected at random.
+        
+        Params
+        ------
+        - pdata: ProteinData object to modify
+        - resid: Residue ID or list of IDs to collapse
+        - ca_fixed: If True, and a resid is an amino acid, the CA atom will be fixed in place
+        - center_atom_noise_sigma: Standard deviation for noise applied to the center atom
+        - limb_atom_noise_sigma: Standard deviation for noise applied to limb atoms
+        - other_atom_noise_sigma: Standard deviation for noise applied to all other atoms not targeted for collapsing. If None, no noise is applied to other atoms.
+        - time: Time component for flow labels. If 'random', assigns random time. If float, uses that value. If None, no time interpolation.
+        """
+
+        # create noise mask and position labels if not already present
+        if pdata.atom_noised_mask is None:
+            pdata.atom_noised_mask = torch.zeros(len(pdata.positions), dtype=torch.bool)
+        if pdata.position_labels is None:
+            pdata.position_labels = pdata.positions.clone()
+        if pdata.atom_movable_mask is None:
+            pdata.atom_movable_mask = torch.zeros(len(pdata.positions), dtype=torch.bool)
+
+        # for resid as a list
+        if not isinstance(resid, list):
+            resid = [resid]
+
+        # Track all atoms that are targeted for collapsing
+        all_collapsed_atoms_mask = torch.zeros(len(pdata.positions), dtype=torch.bool)
+
+        for resid_ in resid:
+            # mark atoms in this residue
+            resid = int(resid_)
+            is_resid_mask = (pdata.atom_resid == resid_).squeeze(-1)
+            # assign the mask for noised atoms
+            pdata.atom_noised_mask[is_resid_mask] = True
+            all_collapsed_atoms_mask[is_resid_mask] = True
+
+            # find the center atom
+            # first get the resname for this residue
+            resname = pdata.atom_resname[torch.where(is_resid_mask)[0][0]]
+            is_aa = False
+            if resname in RESNAME_3LETTER:
+                is_aa = True
+                # atom name is a list of str so we can't do tensor masking
+                center_atom_idx = np.where(((pdata.atom_name == 'CA').flatten() * is_resid_mask.numpy().flatten()).astype(bool))[0][0]
+            else:
+                # for non-amino acids, select a random atom as the center
+                center_atom_idx = np.random.choice(np.where(is_resid_mask)[0])
+
+            # determine center atom position
+            if ca_fixed and is_aa:
+                # keep the CA atom fixed
+                center_atom_position = pdata.positions[center_atom_idx].clone()
+                # turn the mask off for the center atom
+                pdata.atom_noised_mask[center_atom_idx] = False
+            else:
+                # noise the center atom position
+                center_atom_position = pdata.positions[center_atom_idx] + \
+                    torch.randn(3, dtype=DEFAULT_FLOAT) * center_atom_noise_sigma
+            # shift all atoms to equal the center atom position
+            pdata.positions[is_resid_mask] = center_atom_position
+            # generate noise around the center atom
+            is_resid_but_not_center = is_resid_mask.clone()
+            is_resid_but_not_center[center_atom_idx] = False
+            # noise the limb atoms
+            pdata.positions[is_resid_but_not_center] += torch.randn(
+                is_resid_but_not_center.sum(), 3, dtype=DEFAULT_FLOAT) * limb_atom_noise_sigma
+
+        # Handle other atoms noise if specified
+        if other_atom_noise_sigma is not None:
+            # Find all atoms NOT targeted for collapsing
+            other_atoms_mask = ~all_collapsed_atoms_mask
+            
+            # If ca_fixed is True, respect that for amino acid CA atoms in other residues too
+            if ca_fixed:
+                # Find all CA atoms in amino acids that are not being collapsed
+                for i, (atom_name, resname) in enumerate(zip(pdata.atom_name.flatten(), pdata.atom_resname.flatten())):
+                    if (atom_name == 'CA' and resname in RESNAME_3LETTER and 
+                        other_atoms_mask[i]):
+                        other_atoms_mask[i] = False  # Don't noise CA atoms if ca_fixed=True
+            
+            # Apply noise to other atoms
+            if other_atoms_mask.any():
+                pdata.positions[other_atoms_mask] += torch.randn(
+                    other_atoms_mask.sum(), 3, dtype=DEFAULT_FLOAT) * other_atom_noise_sigma
+                # Mark these atoms as noised
+                pdata.atom_noised_mask[other_atoms_mask] = True
+
+        # update all noised atoms to be movable
+        pdata.atom_movable_mask[pdata.atom_noised_mask] = True
+
+        # assign the target flow vectors
+        # set the flow labels to be the difference between the original and noised positions
+        pdata.position_flow_labels = pdata.position_labels - pdata.positions
+
+        # if we have a time component specified, assign it and update the actual positions
+        if time is not None:
+            if isinstance(time, str) and time == 'random':
+                # assign a random time value
+                time = torch.rand(1, dtype=DEFAULT_FLOAT).item()
+            elif isinstance(time, (int, float)):
+                time = float(time)
+            else:
+                raise ValueError(f"Invalid time value: {time}. Must be 'random', int, or float.")
+            
+            # update the currently fully noised position labels with an interpolation at the specified time
+            pdata.positions = pdata.positions + pdata.position_flow_labels * time
+
+            # assign the time component if not already present
+            if pdata.time is None:
+                pdata.time = torch.tensor([time], dtype=DEFAULT_FLOAT)
+
+        # if we are in here, we should invalidate the distances attribute
+        pdata.distances = None
+
+        return pdata
+
+    def _mask_atoms(
+        self, 
+        pdata: ProteinData, 
+        indices_to_mask: List[int],
+        indices_to_tweak: List[int] = None,
+        indices_to_keep: List[int] = None
+    ) -> ProteinData:
+        """Mask specific atoms in the ProteinData object with BERT-style strategy.
+        
+        NOTE: The element is of course masked, but information that specified the atom will also be masked.
+        Eg. any atom features are set to mask, bonds associated with the atom are removed including aromatic and ring indicators.
+
+        NOTE: This method could potentially delete topology information associated with masked atoms to prevent leakage. For now,
+        instead we will manully delete L1 gradient features for masked atoms. This also allows us to easily keep
+        eg. planar constraints for one atom that is not masked in a constraint that contains a masked atom.
+
+        Args:
+            pdata: ProteinData object to modify
+            indices_to_mask: List of atom indices to mask with [MASK] token
+            indices_to_tweak: List of atom indices to replace with random tokens (BERT 10% random)
+            indices_to_keep: List of atom indices to keep unchanged (BERT 10% unchanged)
+        Returns:
+            Modified ProteinData object with masked atoms
+        """
+        
+        # set element labels
+        if pdata.element_labels is None:
+            pdata.element_labels = pdata.element.clone()
+
+        # Combine all indices that are being modified for atom_masked_mask
+        all_modified_indices = set()
+        if indices_to_mask:
+            all_modified_indices.update(indices_to_mask)
+        if indices_to_tweak:
+            all_modified_indices.update(indices_to_tweak)
+        if indices_to_keep:
+            all_modified_indices.update(indices_to_keep)
+        
+        # Set atom_masked_mask for all modified atoms
+        if all_modified_indices:
+            if pdata.atom_masked_mask is None:
+                pdata.atom_masked_mask = torch.zeros(len(pdata.element), dtype=torch.bool)
+            for idx in all_modified_indices:
+                pdata.atom_masked_mask[idx] = True
+
+        # Process atom features with BERT-style masking
+        for feature_name in self.atom_features:
+            assert getattr(pdata, feature_name) is not None, f"Feature {feature_name} not found in ProteinData"
+            feature_tensor = getattr(pdata, feature_name)
+            tokenizer = self.tokenizers[feature_name]
+            
+            # Mask tokens (80% in BERT)
+            if indices_to_mask:
+                mask_id = tokenizer.mask_token_id
+                feature_tensor[indices_to_mask] = mask_id
+            
+            # Random tokens (10% in BERT)
+            if indices_to_tweak:
+                for idx in indices_to_tweak:
+                    # Get random token from vocabulary (excluding special tokens)
+                    vocab_size = tokenizer.vocab_size
+                    # Exclude mask, unk tokens if they exist
+                    exclude_tokens = []
+                    if tokenizer.mask_token_id is not None:
+                        exclude_tokens.append(tokenizer.mask_token_id)
+                    if tokenizer.unk_token_id is not None:
+                        exclude_tokens.append(tokenizer.unk_token_id)
+                    
+                    valid_tokens = [i for i in range(vocab_size) if i not in exclude_tokens]
+                    random_token = torch.randint(0, len(valid_tokens), (1,)).item()
+                    feature_tensor[idx] = valid_tokens[random_token]
+            
+            # Keep original tokens (10% in BERT) - no modification needed for indices_to_keep
+
+        # Get all edges associated with a MASKED atom eg. not the modified or unmodified ones
+        # find all edges in the edge index that contain oned of the indices_to_mask
+        left_has_masked_atom = torch.isin(pdata.edge_index[:, 0], torch.Tensor(indices_to_mask))
+        right_has_masked_atom = torch.isin(pdata.edge_index[:, 1], torch.Tensor(indices_to_mask))
+        # Combine both masks to find edges with masked atoms
+        masked_edges_mask = left_has_masked_atom | right_has_masked_atom
+        # Mask all edge features associated with masked atoms
+        for feature_name in self.bond_features:
+            if hasattr(pdata, feature_name) and getattr(pdata, feature_name) is not None:
+                feature_tensor = getattr(pdata, feature_name)
+                mask_id = self.tokenizers[feature_name].mask_token_id
+                # Apply mask to all edges that have masked atoms
+                feature_tensor[masked_edges_mask] = mask_id
+
+        return pdata
+    
+    def _anonymize_metals_for_classification(self, pdata: ProteinData, include_special_tokens: bool = True) -> ProteinData:
+        """
+        Anonymize metals for global classification task by converting all metals to <METAL> token
+        and masking associated features. Sets global label vector for metal counts.
+        
+        This method:
+        1. Determines metal count labels from current element tokens
+        2. Converts all metal elements to <METAL> token
+        3. Masks all node and edge features associated with metal atoms
+        4. Assigns global labels to pdata.global_labels
+        
+        Args:
+            pdata: ProteinData object to modify
+            include_special_tokens: If True, include special tokens in label vector
+            
+        Returns:
+            Modified ProteinData object with anonymized metals and global labels
+        """
+        # Get element tokenizer
+        element_tokenizer = self.tokenizers['element']
+        
+        # Use cached metal token IDs for efficient vectorized detection
+        metal_token_ids = element_tokenizer.metal_token_ids
+        
+        # Find metal atoms using isin (much faster than loop)
+        metal_mask = torch.isin(pdata.element, metal_token_ids)
+        
+        # Extract metal tokens for count vector calculation
+        metal_tokens = pdata.element[metal_mask]
+        
+        # Generate metal count labels using ElementTokenizer method
+        metal_counts = element_tokenizer.encode_metal_composition_counts_from_tokens(
+            metal_tokens, include_special_tokens=include_special_tokens
+        )
+        
+        # Store as global labels
+        # make sure default float
+        pdata.global_labels = metal_counts.to(dtype=DEFAULT_FLOAT)
+        
+        # Convert all metals to <METAL> token (vectorized)
+        metal_token_id = element_tokenizer.metal_token_id
+        pdata.element[metal_mask] = metal_token_id
+        
+        # Mask all node features for metal atoms (vectorized)
+        for feature_name in self.atom_features:
+            # skip element since we already converted to metal token
+            if feature_name == 'element':
+                continue
+            if hasattr(pdata, feature_name) and getattr(pdata, feature_name) is not None:
+                feature_tensor = getattr(pdata, feature_name)
+                mask_id = self.tokenizers[feature_name].mask_token_id
+                feature_tensor[metal_mask] = mask_id
+        
+        # Mask all edge features associated with metal atoms (vectorized)
+        if hasattr(pdata, 'edge_index') and pdata.edge_index is not None:
+            edge_index = pdata.edge_index
+            # Vectorized edge detection - check if either endpoint is a metal
+            metal_edges_mask = metal_mask[edge_index[:, 0]] | metal_mask[edge_index[:, 1]]
+            
+            # Mask bond features for these edges
+            for feature_name in self.bond_features:
+                if hasattr(pdata, feature_name) and getattr(pdata, feature_name) is not None:
+                    feature_tensor = getattr(pdata, feature_name)
+                    mask_id = self.tokenizers[feature_name].mask_token_id
+                    feature_tensor[metal_edges_mask] = mask_id
+        
+        return pdata
+
+    def __call__(
+        self,
+        chains: Union[List[Chain], Chain],
+        # for node classification task
+        node_mlm_do: bool = False,
+        node_mlm_rate: float = 0.15,
+        node_mlm_subrate_tweak: float = 0.1,
+        node_mlm_subrate_keep: float = 0.1,
+        # for global classification task
+        metal_classification: bool = False,
+        metal_classification_include_special_tokens: bool = True,
+        # for residue collapsing / denoising
+        residue_collapse_do: bool = False,
+        residue_collapse_specific_residues: Union[List[Union[str, int]], str, int] = None,
+        residue_collapse_rate: float = 0.3,
+        residue_collapse_ca_fixed: bool = False,
+        residue_collapse_center_atom_noise_sigma: float = 0.5,
+        residue_collapse_limb_atom_noise_sigma: float = 0.2,
+        residue_collapse_other_atom_noise_sigma: float = None,
+        residue_collapse_time: Union[float, 'random', None] = None,  # 'random' or a float value
+        movable_atoms: str = 'noised', # 'none', 'all', 'noised', 'noised_and_side_chains'
+        # custom behavior eg. mutating
+        mutations: Tuple[int, str] = None,  # (resid, new_resname) to mutate a residue
+        **kwargs
+    ):
+        """
+        Featurize Chains into ProteinData objects.
+
+        Optional functionalities:
+        - Node masking for MLM training tasks
+        - Metal anonymization for global classification tasks
+        - Residue collapsing for denoising tasks
+        
+        Args:
+            chains: List of Chain objects or a single Chain to featurize
+            node_mlm_do: If True, apply MLM-style masking to nodes
+            node_mlm_rate: Probability of masking nodes for MLM training (0.0 to 1.0)
+            node_mlm_subrate_tweak: Probability of replacing masked nodes with random tokens (default 0.1)
+            node_mlm_subrate_keep: Probability of keeping original tokens (default 0.1)
+            metal_classification: If True, anonymize metals for global classification
+            metal_classification_include_special_tokens: Include special tokens in metal count vector
+            residue_collapse_do: If True, collapse specified residues and apply noising
+            residue_collapse_specific_residues: Residue IDs to collapse (list of str/int or single str/int)
+            residue_collapse_rate: Probability of collapsing residues (0.0 to 1.0)
+            residue_collapse_ca_fixed: If True, keep CA atom fixed during collapse / noising
+            residue_collapse_center_atom_noise_sigma: Standard deviation for center atom noise
+            residue_collapse_limb_atom_noise_sigma: Standard deviation for limb atom noise
+            residue_collapse_other_atom_noise_sigma: Standard deviation for other atom noise
+            residue_collapse_time: Time component for flow labels ('random' or float)
+            movable_atoms: Specification of movable atoms during noising
+                - 'none': No atoms are movable
+                - 'all': All atoms are movable
+                - 'noised': Only noised atoms are movable eg. exactly the noise mask
+                - 'noised_and_side_chains': Any side chain atom is movable in addition to noised atoms
+            mutations: Tuple of (resid, new_resname) to mutate a residue
+            **kwargs: Additional keyword arguments for customization
+        Returns:
+            BatchProteinData object containing featurized data
+        """
+        if isinstance(chains, Chain):
+            chains = [chains]
+
+        if not isinstance(chains, list):
+            raise ValueError("Input must be a Chain object or a list of Chain objects")
+        
+        # Initialize list to hold featurized ProteinData objects
+        featurized_data = []
+
+        for chain in chains:
+            features = self.featurize_one(chain, **kwargs)
+
+            ########################################
+            # COLLAPSING, NOISING, AND MUTATIONS
+            ########################################
+            if residue_collapse_do:
+                resids_to_collapse = []
+                # select residue ids at random
+                if residue_collapse_rate > 0.0:
+                    all_resids = features.atom_resid.unique()
+                    n_residues = len(all_resids)
+                    n_to_collapse = round(n_residues * residue_collapse_rate)
+                    if n_to_collapse > 0:
+                        # select random residues to collapse
+                        selected_resids = all_resids[torch.randperm(n_residues)[:n_to_collapse]]
+                        resids_to_collapse.extend(selected_resids.tolist())
+
+                # if specific residues are provided, add them to the list
+                if residue_collapse_specific_residues is not None:
+                    if not isinstance(residue_collapse_specific_residues, list):
+                        residue_collapse_specific_residues = [residue_collapse_specific_residues]
+                    resids_to_collapse.extend(residue_collapse_specific_residues)
+
+                # remove duplicates and convert to int
+                resids_to_collapse = list(set(resids_to_collapse))
+                resids_to_collapse = [int(resid) for resid in resids_to_collapse]
+
+                # do it
+                features = self._collapse_and_noise_residues(
+                    features,
+                    resid=resids_to_collapse,
+                    ca_fixed=residue_collapse_ca_fixed,
+                    center_atom_noise_sigma=residue_collapse_center_atom_noise_sigma,
+                    limb_atom_noise_sigma=residue_collapse_limb_atom_noise_sigma,
+                    other_atom_noise_sigma=residue_collapse_other_atom_noise_sigma,
+                    time=residue_collapse_time
+                )
+
+            # apply mutations
+            if mutations is not None:
+                raise NotImplementedError("Mutations are not yet implemented in the featurizer.")
+
+            # assign the atom movable mask based on the specified behavior\
+            if features.atom_movable_mask is None:
+                # this might be true if not collapsing residues be still should do it outside of the
+                # collapsing logic incase mutations were made
+                features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
+
+            if movable_atoms == 'none':
+                features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
+            elif movable_atoms == 'all':
+                features.atom_movable_mask = torch.ones(len(features.positions), dtype=torch.bool)
+            elif movable_atoms == 'noised':
+                # already set in the _collapse_and_noise_residues method or as zeros above if not
+                pass
+            elif movable_atoms == 'noised_and_side_chains':
+                # noised already set, now we just have to find all atoms in 
+                # amino acids that are not CA atoms and set them as movable
+                is_aa_mask = features.atom_resname.isin(RESNAME_3LETTER)
+                is_ca_mask = (features.atom_name == 'CA').flatten()
+                to_move_mask = is_aa_mask & ~is_ca_mask
+                features.atom_movable_mask[to_move_mask] = True
+            else:
+                raise ValueError(f"Invalid movable_atoms value: {movable_atoms}. "
+                                    "Must be 'none', 'all', 'noised', or 'noised_and_side_chains'.")
+            
+            ########################################
+            # NODE MASKING FOR MLM TASKS
+            ########################################
+            if node_mlm_do:
+                # Determine number of nodes to mask based on rate
+                n_nodes = len(features.element)
+                n_to_mask = round(n_nodes * node_mlm_rate)
+                
+                if n_to_mask > 0:
+                    # Randomly select nodes to mask
+                    indices_to_mask = set(torch.randperm(n_nodes)[:n_to_mask].tolist())
+                    
+                    # Determine subrates for tweaking and keeping
+                    n_to_tweak = round(n_to_mask * node_mlm_subrate_tweak)
+                    n_to_keep = round(n_to_mask * node_mlm_subrate_keep)
+                    
+                    # select indices to tweak and keep from the already masked indices
+                    masked_indices_random_perm = torch.randperm(indices_to_mask)
+                    indices_to_tweak = set(masked_indices_random_perm[:n_to_tweak].tolist())
+                    indices_to_keep = set(masked_indices_random_perm[n_to_tweak:n_to_tweak + n_to_keep].tolist())
+                    # remove indices from mask that are in tweak or keep
+                    indices_to_mask -= indices_to_tweak
+                    indices_to_mask -= indices_to_keep
+
+                # Apply BERT-style masking
+                # do this outside of the if statement so that even if no nodes are masked,
+                # we still call the method to ensure other attributes are assigned correctly.
+                features = self._mask_atoms(
+                    features,
+                    indices_to_mask=list(indices_to_mask),
+                    indices_to_tweak=list(indices_to_tweak),
+                    indices_to_keep=list(indices_to_keep)
+                )
+
+            ########################################
+            # METAL ANONYMIZATION FOR CLASSIFICATION TASKS
+            ########################################
+            if metal_classification:
+                features = self._anonymize_metals_for_classification(
+                    features,
+                    include_special_tokens=metal_classification_include_special_tokens
+                )
+            # Append the featurized ProteinData object to the list
+            featurized_data.append(features)
+
+        # reset the distances after we maybe screwed with them
+        if self.distances is None:
+            features.set_distances()
+
+        # convert to BatchProteinData
+        batch_data = BatchProteinData.from_list(featurized_data)
+
+        return batch_data
+                
+
+
+
 
     def get_feature_vocab_sizes(self) -> Dict[str, int]:
         """
@@ -455,6 +951,9 @@ class MetalSiteFeaturizer:
         """Return string representation of the featurizer."""
         return (f"MetalSiteFeaturizer(atom_features={self.atom_features}, "
                 f"bond_features={self.bond_features})")
+
+
+    
 
             
 

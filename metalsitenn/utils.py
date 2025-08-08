@@ -387,12 +387,19 @@ def visualize_protein_data_3d(
         raise ValueError("ProteinData must have element")
     
     # Validate velocities if provided
-    if velocities is not None:
+    if velocities == 'flow':
+        assert protein_data.position_flow_labels is not None, "ProteinData must have position_flow_labels for flow visualization"
+        assert protein_data.time is not None, "ProteinData must have time for flow visualization"
+        vectors = protein_data.position_flow_labels * (1 - protein_data.time.item())
+        velocities = vectors
+
+    elif velocities is not None:
         positions = protein_data.positions
         if velocities.shape[0] != positions.shape[0]:
             raise ValueError(f"Velocities shape {velocities.shape} doesn't match positions shape {positions.shape}")
         if velocities.shape[1] != 3:
             raise ValueError(f"Velocities must have shape (N_atoms, 3), got {velocities.shape}")
+    
     
     # Get basic data
     positions = protein_data.positions  # (N_atoms, 3)
@@ -453,7 +460,10 @@ def visualize_protein_data_3d(
         masked = is_masked[i] or (len(masked_atoms) > 0 and masked_atoms[i])
         
         # Determine color and size
-        if masked:
+        if highlight_atoms is not None and i in highlight_atoms:
+            color = highlight_color
+            radius = sphere_radius * 1.5
+        elif masked:
             color = mask_color
             radius = mask_size
         elif i == focus_atom:
@@ -462,12 +472,6 @@ def visualize_protein_data_3d(
         elif i in focus_neighbors:
             color = neighbor_color
             radius = sphere_radius * 1.3
-        elif highlight_metals and (element in ALL_METALS or element == 'Fe'):
-            color = metal_color
-            radius = metal_size
-        elif highlight_atoms is not None and i in highlight_atoms:
-            color = highlight_color
-            radius = sphere_radius * 1.5
         else:
             # Use CPK colors for common elements
             cpk_colors = {
@@ -558,32 +562,32 @@ def visualize_protein_data_3d(
                         'fontSize': 8
                     })
     
-    # Add bonds from topology (prioritized source)
-    if protein_data.topology is not None and 'bonds' in protein_data.topology:
-        bonds = protein_data.topology['bonds']  # (N_bonds, 2)
+    # # Add bonds from topology (prioritized source)
+    # if protein_data.topology is not None and 'bonds' in protein_data.topology:
+    #     bonds = protein_data.topology['bonds']  # (N_bonds, 2)
         
-        for bond_idx in range(len(bonds)):
-            i, j = bonds[bond_idx]
-            i, j = i.item(), j.item()
+    #     for bond_idx in range(len(bonds)):
+    #         i, j = bonds[bond_idx]
+    #         i, j = i.item(), j.item()
             
-            # Skip if atoms are masked
-            if (len(masked_atoms) > 0 and (masked_atoms[i] or masked_atoms[j])):
-                continue
+    #         # Skip if atoms are masked
+    #         if (len(masked_atoms) > 0 and (masked_atoms[i] or masked_atoms[j])):
+    #             continue
                 
-            # Add bond as cylinder
-            pos_i = positions[i].numpy()
-            pos_j = positions[j].numpy()
+    #         # Add bond as cylinder
+    #         pos_i = positions[i].numpy()
+    #         pos_j = positions[j].numpy()
             
-            viewer.addCylinder({
-                'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
-                'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
-                'radius': stick_radius,
-                'color': 'gray',
-                'alpha': 0.8
-            })
+    #         viewer.addCylinder({
+    #             'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
+    #             'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
+    #             'radius': stick_radius,
+    #             'color': 'gray',
+    #             'alpha': 0.8
+    #         })
     
     # Fallback: Add bonds from edge features if topology unavailable
-    elif protein_data.bond_order is not None and protein_data.edge_index is not None:
+    if protein_data.bond_order is not None and protein_data.edge_index is not None:
         bond_orders = protein_data.bond_order.squeeze(-1)  # (E,)
         edge_indices = protein_data.edge_index  # (E, 2)
         
@@ -603,8 +607,6 @@ def visualize_protein_data_3d(
             if bond_token == non_bonded_id:
                 continue
             if mask_token_id is not None and bond_token == mask_token_id:
-                continue
-            if (len(masked_atoms) > 0 and (masked_atoms[i] or masked_atoms[j])):
                 continue
                 
             # Decode bond order
