@@ -12,6 +12,27 @@ import torch
 import numpy as np
 import copy
 
+# Field constants
+TENSOR_FIELDS = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'atom_movable_mask',
+                'atom_resid', 'atom_ishetero', 'distances', 'bond_order', 'is_aromatic',
+                'is_in_ring', 'edge_index', 'atom_masked_mask', 'element_labels', 
+                'element_loss_weights', 'atom_noised_mask', 'position_flow_labels',
+                'position_labels', 'position_loss_weights', 'global_features', 
+                'time', 'global_labels', 'global_loss_weights']
+
+ATOM_LEVEL_TENSOR_FIELDS = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'atom_movable_mask',
+                           'atom_resid', 'atom_ishetero', 'atom_masked_mask', 'element_labels', 
+                           'element_loss_weights', 'atom_noised_mask', 'position_flow_labels',
+                           'position_labels', 'position_loss_weights']
+
+GLOBAL_TENSOR_FIELDS = ['global_features', 'time', 'global_labels', 'global_loss_weights']
+
+EDGE_TENSOR_FIELDS = ['distances', 'bond_order', 'is_aromatic', 'is_in_ring']
+
+ATOM_LEVEL_NUMPY_FIELDS = ['atom_name', 'atom_resname']
+
+GLOBAL_NUMPY_FIELDS = ['pdb_id']
+
 
 def make_top_k_graph(r, hop_distances, k=10):
     """
@@ -98,7 +119,6 @@ class ProteinData:
     position_labels: torch.Tensor=None  # [N, 3] - labels for positions
     position_loss_weights: torch.Tensor=None  # [N, 3] - per atom weights for denoising loss
 
-
     def __repr__(self) -> str:
         """
         Return shapes or lengths of data structures in a readable format.
@@ -136,7 +156,6 @@ class ProteinData:
         distances = R[src, dst].unsqueeze(-1)  # [E, 1]
         self.distances = distances
 
-
     def clone(self) -> 'ProteinData':
         """
         Create a deep copy of the ProteinData instance.
@@ -154,6 +173,33 @@ class ProteinData:
             else:
                 data[field] = copy.deepcopy(value)
         return ProteinData(**data)
+    
+    def to(self, device: str) -> 'ProteinData':
+        """
+        Move all tensor attributes to specified device.
+        
+        Args:
+            device: Target device (e.g., 'cuda', 'cpu', 'cuda:0')
+            
+        Returns:
+            Self for method chaining
+        """
+        for field_name in TENSOR_FIELDS:
+            attr = getattr(self, field_name, None)
+            if attr is not None and hasattr(attr, 'to'):
+                setattr(self, field_name, attr.to(device))
+        
+        # Handle topology tensors
+        if self.topology is not None:
+            for key, value in self.topology.items():
+                if key == 'permuts':
+                    # Handle list of tensors
+                    self.topology[key] = [tensor.to(device) if hasattr(tensor, 'to') else tensor 
+                                        for tensor in value]
+                elif hasattr(value, 'to'):
+                    self.topology[key] = value.to(device)
+        
+        return self
     
     def save(self, path: str) -> None:
         """
@@ -250,13 +296,7 @@ class BatchProteinData:
     
     def _stack_tensor_attributes(self, protein_data_list: List[ProteinData]):
         """Stack regular tensor attributes (non-topology, non-numpy)."""
-        tensor_fields = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'atom_movable_mask',
-                        'atom_resid', 'atom_ishetero', 'distances', 'bond_order', 'is_aromatic',
-                        'is_in_ring', 'atom_masked_mask', 'element_labels', 'element_loss_weights',
-                        'atom_noised_mask', 'position_flow_labels', 'position_labels', 
-                        'position_loss_weights']
-        
-        for field_name in tensor_fields:
+        for field_name in TENSOR_FIELDS:
             tensors = [getattr(p, field_name) for p in protein_data_list 
                       if getattr(p, field_name) is not None]
             if tensors:
@@ -272,8 +312,7 @@ class BatchProteinData:
             self.edge_index = torch.cat(edge_indices, dim=0)
         
         # Handle global attributes (no stacking needed for per-sample attributes)
-        global_fields = ['global_features', 'time', 'global_labels', 'global_loss_weights']
-        for field_name in global_fields:
+        for field_name in GLOBAL_TENSOR_FIELDS:
             tensors = [getattr(p, field_name) for p in protein_data_list 
                       if getattr(p, field_name) is not None]
             if tensors:
@@ -281,9 +320,15 @@ class BatchProteinData:
     
     def _stack_numpy_attributes(self, protein_data_list: List[ProteinData]):
         """Stack numpy array attributes."""
-        numpy_fields = ['atom_name', 'atom_resname', 'pdb_id']
+        # Handle atom-level numpy arrays
+        for field_name in ATOM_LEVEL_NUMPY_FIELDS:
+            arrays = [getattr(p, field_name) for p in protein_data_list 
+                     if getattr(p, field_name) is not None]
+            if arrays:
+                setattr(self, field_name, np.concatenate(arrays, axis=0))
         
-        for field_name in numpy_fields:
+        # Handle global numpy arrays
+        for field_name in GLOBAL_NUMPY_FIELDS:
             arrays = [getattr(p, field_name) for p in protein_data_list 
                      if getattr(p, field_name) is not None]
             if arrays:
@@ -330,6 +375,38 @@ class BatchProteinData:
                     stacked_topology[key] = torch.cat(tensors, dim=0)
         
         self.topology = stacked_topology if stacked_topology else None
+    
+    def to(self, device: str) -> 'BatchProteinData':
+        """
+        Move all tensor attributes to specified device.
+        
+        Args:
+            device: Target device (e.g., 'cuda', 'cpu', 'cuda:0')
+            
+        Returns:
+            Self for method chaining
+        """
+        # Move batch tensor
+        if self.batch is not None:
+            self.batch = self.batch.to(device)
+        
+        # Move all tensor attributes
+        for field_name in TENSOR_FIELDS:
+            attr = getattr(self, field_name, None)
+            if attr is not None and hasattr(attr, 'to'):
+                setattr(self, field_name, attr.to(device))
+        
+        # Move topology tensors
+        if self.topology is not None:
+            for key, value in self.topology.items():
+                if key == 'permuts':
+                    # Handle list of tensors
+                    self.topology[key] = [tensor.to(device) if hasattr(tensor, 'to') else tensor 
+                                        for tensor in value]
+                elif hasattr(value, 'to'):
+                    self.topology[key] = value.to(device)
+        
+        return self
     
     def get(self, idx: int) -> ProteinData:
         """
@@ -433,26 +510,19 @@ class BatchProteinData:
             
             # Extract atom-level data
             data = {}
-            atom_fields = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'atom_movable_mask',
-                        'atom_resid', 'atom_ishetero', 'atom_masked_mask', 'element_labels', 
-                        'element_loss_weights', 'atom_noised_mask', 'position_flow_labels',
-                        'position_labels', 'position_loss_weights']
-            
-            for field_name in atom_fields:
+            for field_name in ATOM_LEVEL_TENSOR_FIELDS:
                 attr = getattr(self, field_name, None)
                 if attr is not None:
                     data[field_name] = attr[atom_mask]
             
-            # Handle atom-level numpy arrays (NOT pdb_id)
-            numpy_fields = ['atom_name', 'atom_resname']
-            for field_name in numpy_fields:
+            # Handle atom-level numpy arrays
+            for field_name in ATOM_LEVEL_NUMPY_FIELDS:
                 attr = getattr(self, field_name, None)
                 if attr is not None:
                     data[field_name] = attr[atom_mask.cpu().numpy()]
             
-            # Handle global numpy arrays (like pdb_id)
-            global_numpy_fields = ['pdb_id']
-            for field_name in global_numpy_fields:
+            # Handle global numpy arrays
+            for field_name in GLOBAL_NUMPY_FIELDS:
                 attr = getattr(self, field_name, None)
                 if attr is not None:
                     data[field_name] = attr[i:i+1]  # Keep as [1,1] array
@@ -468,8 +538,7 @@ class BatchProteinData:
                     data['edge_index'] = sample_edge_index
                     
                     # Extract corresponding edge features
-                    edge_fields = ['distances', 'bond_order', 'is_aromatic', 'is_in_ring']
-                    for field_name in edge_fields:
+                    for field_name in EDGE_TENSOR_FIELDS:
                         attr = getattr(self, field_name, None)
                         if attr is not None:
                             data[field_name] = attr[edge_mask]
@@ -512,8 +581,7 @@ class BatchProteinData:
                     data['topology'] = sample_topology
             
             # Handle global features
-            global_fields = ['global_features', 'time', 'global_labels', 'global_loss_weights']
-            for field_name in global_fields:
+            for field_name in GLOBAL_TENSOR_FIELDS:
                 attr = getattr(self, field_name, None)
                 if attr is not None:
                     data[field_name] = attr[i:i+1]  # Keep batch dimension
