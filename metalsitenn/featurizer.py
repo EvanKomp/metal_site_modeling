@@ -131,6 +131,10 @@ class MetalSiteFeaturizer:
 
             setattr(pdata, key, values)
 
+        # also asign ground truth positions
+        r = torch.tensor([atom.xyz for atom in chain.atoms.values()], dtype=DEFAULT_FLOAT)
+        setattr(pdata, 'positions', r)
+
         return chain, pdata
     
     def _compute_hop_distances(self, chain: Chain, atom_to_idx: Dict[Tuple, int]) -> torch.Tensor:
@@ -175,8 +179,9 @@ class MetalSiteFeaturizer:
         """
         hop_distances = self._compute_hop_distances(chain, atom_to_idx) # [N, N]
 
-        r = torch.tensor([atom.xyz for atom in chain.atoms.values()], dtype=DEFAULT_FLOAT)
-        setattr(pdata, 'positions', r)
+        r = getattr(pdata, 'positions', None)
+        if r is None:
+            raise ValueError("ProteinData must have 'positions' attribute set before assigning graph structure")
 
         src, dst, R = make_top_k_graph(
             r=r,
@@ -421,8 +426,10 @@ class MetalSiteFeaturizer:
         setattr(pdata, 'topology', result)
         return pdata
     
-    def featurize_one(self, chain: Chain, **kwargs) -> ProteinData:
-        """ Featurize a single Chain object into a ProteinData object.
+    def _init_atoms_into_protein_data(self, chain: Chain, **kwargs) -> ProteinData:
+        """Tokenize a single Chain object into a ProteinData object with just atom features.
+        Bond features will need to wait until any noising occurs to avoid graph leakage.
+
         Args:
             chain: Chain object to featurize
             **kwargs: Additional keyword arguments for tokenizers
@@ -438,18 +445,28 @@ class MetalSiteFeaturizer:
         # Assign atom features
         chain, pdata = self._process_atom_features(chain, pdata, **kwargs)
         
-        # Create atom to index mapping
+        return pdata
+    
+    def _make_graph_and_tokenize_edges(
+            self,
+            chain: Chain,
+            pdata: ProteinData,
+            **kwargs) -> ProteinData:
+        """Create a graph from the chain based on current positions and tokenize the edges with bond features.
+
+        Args:
+            chain: Chain object to featurize
+            pdata: ProteinData object to modify - should already have atom features and positions assigned
+            **kwargs: Additional keyword arguments for tokenizers
+        """
         atom_to_idx = {atom_key: idx for idx, atom_key in enumerate(chain.atoms.keys())}
-        
         # Assign graph structure
         pdata = self._assign_graph(chain, pdata, atom_to_idx)
-        
         # Assign bond features
         pdata = self._process_bond_features(chain, pdata, atom_to_idx, **kwargs)
-        
         # Extract topology information
         pdata = self._get_topology(chain, pdata, atom_to_idx)
-        
+
         return pdata
     
     def _collapse_and_noise_residues(
@@ -574,7 +591,7 @@ class MetalSiteFeaturizer:
 
             # assign the time component if not already present
             if pdata.time is None:
-                pdata.time = torch.tensor([time], dtype=DEFAULT_FLOAT)
+                pdata.time = torch.tensor([time], dtype=DEFAULT_FLOAT).unsqueeze(0)  # [1, 1] shape
 
         # if we are in here, we should invalidate the distances attribute
         pdata.distances = None
@@ -707,19 +724,23 @@ class MetalSiteFeaturizer:
         )
         
         # Store as global labels
-        # make sure default float
-        pdata.global_labels = metal_counts.to(dtype=DEFAULT_FLOAT)
+        # make sure default float and it is a 1,d tensor
+        pdata.global_labels = metal_counts.to(dtype=DEFAULT_FLOAT).unsqueeze(0)  # [1, num_metal_types]
         
         # Convert all metals to <METAL> token (vectorized)
         metal_token_id = element_tokenizer.metal_token_id
         pdata.element[metal_mask] = metal_token_id
         
-        # Mask all node features for metal atoms (vectorized)
+        # Not totally sure exactly what needs to be masked here, I think charge
+        # since we did not set it to unknown earlier as to not give away the metal type.
+        # nut nhyd and hub are already unknown. For now leave it there since if the model
+        # did MLM it might have learned some reasoning with based on the unknown
         for feature_name in self.atom_features:
             # skip element since we already converted to metal token
-            if feature_name == 'element':
+            if feature_name in ['element', 'nhyd', 'hyb']:
                 continue
             if hasattr(pdata, feature_name) and getattr(pdata, feature_name) is not None:
+                # right now only happening with charge
                 feature_tensor = getattr(pdata, feature_name)
                 mask_id = self.tokenizers[feature_name].mask_token_id
                 feature_tensor[metal_mask] = mask_id
@@ -741,7 +762,7 @@ class MetalSiteFeaturizer:
 
     def __call__(
         self,
-        chains: Union[List[Chain], Chain],
+        data: Union[List[Chain], Chain, List[ProteinData], ProteinData],
         # for node classification task
         node_mlm_do: bool = False,
         node_mlm_rate: float = 0.15,
@@ -765,22 +786,22 @@ class MetalSiteFeaturizer:
         **kwargs
     ):
         """
-        Featurize Chains into ProteinData objects.
+        Featurize Chains or ProteinData objects.
 
         Optional functionalities:
         - Node masking for MLM training tasks
         - Metal anonymization for global classification tasks
-        - Residue collapsing for denoising tasks
+        - Residue collapsing for denoising tasks (Chain input only)
         
         Args:
-            chains: List of Chain objects or a single Chain to featurize
+            data: List of Chain/ProteinData objects or a single Chain/ProteinData to featurize
             node_mlm_do: If True, apply MLM-style masking to nodes
             node_mlm_rate: Probability of masking nodes for MLM training (0.0 to 1.0)
             node_mlm_subrate_tweak: Probability of replacing masked nodes with random tokens (default 0.1)
             node_mlm_subrate_keep: Probability of keeping original tokens (default 0.1)
             metal_classification: If True, anonymize metals for global classification
             metal_classification_include_special_tokens: Include special tokens in metal count vector
-            residue_collapse_do: If True, collapse specified residues and apply noising
+            residue_collapse_do: If True, collapse specified residues and apply noising (Chain input only)
             residue_collapse_specific_residues: Residue IDs to collapse (list of str/int or single str/int)
             residue_collapse_rate: Probability of collapsing residues (0.0 to 1.0)
             residue_collapse_ca_fixed: If True, keep CA atom fixed during collapse / noising
@@ -793,87 +814,159 @@ class MetalSiteFeaturizer:
                 - 'all': All atoms are movable
                 - 'noised': Only noised atoms are movable eg. exactly the noise mask
                 - 'noised_and_side_chains': Any side chain atom is movable in addition to noised atoms
-            mutations: Tuple of (resid, new_resname) to mutate a residue
+            mutations: Tuple of (resid, new_resname) to mutate a residue (Chain input only)
             **kwargs: Additional keyword arguments for customization
         Returns:
-            BatchProteinData object containing featurized data
+            List of ProteinData objects containing featurized data
         """
-        if isinstance(chains, Chain):
-            chains = [chains]
+        # Determine input type and validate
+        if isinstance(data, (Chain, ProteinData)):
+            data = [data]
 
-        if not isinstance(chains, list):
-            raise ValueError("Input must be a Chain object or a list of Chain objects")
+        if not isinstance(data, list):
+            raise ValueError("Input must be a Chain/ProteinData object or a list of Chain/ProteinData objects")
+        
+        # Check input type consistency and validate constraints
+        if len(data) == 0:
+            raise ValueError("Input list cannot be empty")
+        
+        input_type = type(data[0])
+        if not all(isinstance(item, input_type) for item in data):
+            raise ValueError("All items in input list must be of the same type (either all Chain or all ProteinData)")
+        
+        is_chain_input = input_type == Chain
+        is_protein_data_input = input_type == ProteinData
+        
+        # Validate constraints for ProteinData input
+        if is_protein_data_input:
+            if residue_collapse_do:
+                raise ValueError("Residue collapsing (residue_collapse_do=True) requires Chain input, not ProteinData")
+            if mutations is not None:
+                raise ValueError("Mutations require Chain input, not ProteinData")
+        
+        # not sure exactly how MLM and metal classification could work together - the MLM objective may mask
+        # over the metal and invalidate the classification task.
+        # i think that either could occur with the denoising, however.
+        if node_mlm_do and metal_classification:
+            raise ValueError("Node MLM masking and metal classification cannot be used together. "
+                            "Please choose one or the other.")
         
         # Initialize list to hold featurized ProteinData objects
         featurized_data = []
 
-        for chain in chains:
-            features = self.featurize_one(chain, **kwargs)
+        for item in data:
+            if is_chain_input:
+                ########################################
+                # INITIALIZE PROTEIN DATA OBJECT FROM CHAIN
+                ########################################
+                # we don't yet have graph structure, just atom features and initial positions
+                features = self._init_atoms_into_protein_data(item, **kwargs)
+                # we should be able to conduct noising and collapsing with the current information (eg. no graph)
 
-            ########################################
-            # COLLAPSING, NOISING, AND MUTATIONS
-            ########################################
-            if residue_collapse_do:
-                resids_to_collapse = []
-                # select residue ids at random
-                if residue_collapse_rate > 0.0:
-                    all_resids = features.atom_resid.unique()
-                    n_residues = len(all_resids)
-                    n_to_collapse = round(n_residues * residue_collapse_rate)
-                    if n_to_collapse > 0:
-                        # select random residues to collapse
-                        selected_resids = all_resids[torch.randperm(n_residues)[:n_to_collapse]]
-                        resids_to_collapse.extend(selected_resids.tolist())
+                ########################################
+                # COLLAPSING, NOISING, AND MUTATIONS
+                ########################################
+                if residue_collapse_do:
+                    resids_to_collapse = []
+                    # select residue ids at random
+                    if residue_collapse_rate > 0.0:
+                        all_resids = features.atom_resid.unique()
+                        n_residues = len(all_resids)
+                        n_to_collapse = round(n_residues * residue_collapse_rate)
+                        if n_to_collapse > 0:
+                            # select random residues to collapse
+                            selected_resids = all_resids[torch.randperm(n_residues)[:n_to_collapse]]
+                            resids_to_collapse.extend(selected_resids.tolist())
 
-                # if specific residues are provided, add them to the list
-                if residue_collapse_specific_residues is not None:
-                    if not isinstance(residue_collapse_specific_residues, list):
-                        residue_collapse_specific_residues = [residue_collapse_specific_residues]
-                    resids_to_collapse.extend(residue_collapse_specific_residues)
+                    # if specific residues are provided, add them to the list
+                    if residue_collapse_specific_residues is not None:
+                        if not isinstance(residue_collapse_specific_residues, list):
+                            residue_collapse_specific_residues = [residue_collapse_specific_residues]
+                        resids_to_collapse.extend(residue_collapse_specific_residues)
 
-                # remove duplicates and convert to int
-                resids_to_collapse = list(set(resids_to_collapse))
-                resids_to_collapse = [int(resid) for resid in resids_to_collapse]
+                    # remove duplicates and convert to int
+                    resids_to_collapse = list(set(resids_to_collapse))
+                    resids_to_collapse = [int(resid) for resid in resids_to_collapse]
 
-                # do it
-                features = self._collapse_and_noise_residues(
-                    features,
-                    resid=resids_to_collapse,
-                    ca_fixed=residue_collapse_ca_fixed,
-                    center_atom_noise_sigma=residue_collapse_center_atom_noise_sigma,
-                    limb_atom_noise_sigma=residue_collapse_limb_atom_noise_sigma,
-                    other_atom_noise_sigma=residue_collapse_other_atom_noise_sigma,
-                    time=residue_collapse_time
-                )
+                    # do it
+                    features = self._collapse_and_noise_residues(
+                        features,
+                        resid=resids_to_collapse,
+                        ca_fixed=residue_collapse_ca_fixed,
+                        center_atom_noise_sigma=residue_collapse_center_atom_noise_sigma,
+                        limb_atom_noise_sigma=residue_collapse_limb_atom_noise_sigma,
+                        other_atom_noise_sigma=residue_collapse_other_atom_noise_sigma,
+                        time=residue_collapse_time
+                    )
 
-            # apply mutations
-            if mutations is not None:
-                raise NotImplementedError("Mutations are not yet implemented in the featurizer.")
+                # apply mutations
+                if mutations is not None:
+                    raise NotImplementedError("Mutations are not yet implemented in the featurizer.")
 
-            # assign the atom movable mask based on the specified behavior\
-            if features.atom_movable_mask is None:
-                # this might be true if not collapsing residues be still should do it outside of the
-                # collapsing logic incase mutations were made
-                features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
+                # assign the atom movable mask based on the specified behavior
+                if features.atom_movable_mask is None:
+                    # this might be true if not collapsing residues be still should do it outside of the
+                    # collapsing logic incase mutations were made
+                    features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
 
-            if movable_atoms == 'none':
-                features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
-            elif movable_atoms == 'all':
-                features.atom_movable_mask = torch.ones(len(features.positions), dtype=torch.bool)
-            elif movable_atoms == 'noised':
-                # already set in the _collapse_and_noise_residues method or as zeros above if not
-                pass
-            elif movable_atoms == 'noised_and_side_chains':
-                # noised already set, now we just have to find all atoms in 
-                # amino acids that are not CA atoms and set them as movable
-                is_aa_mask = features.atom_resname.isin(RESNAME_3LETTER)
-                is_ca_mask = (features.atom_name == 'CA').flatten()
-                to_move_mask = is_aa_mask & ~is_ca_mask
-                features.atom_movable_mask[to_move_mask] = True
-            else:
-                raise ValueError(f"Invalid movable_atoms value: {movable_atoms}. "
-                                    "Must be 'none', 'all', 'noised', or 'noised_and_side_chains'.")
+                if movable_atoms == 'none':
+                    features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
+                elif movable_atoms == 'all':
+                    features.atom_movable_mask = torch.ones(len(features.positions), dtype=torch.bool)
+                elif movable_atoms == 'noised':
+                    # already set in the _collapse_and_noise_residues method or as zeros above if not
+                    pass
+                elif movable_atoms == 'noised_and_side_chains':
+                    # noised already set, now we just have to find all atoms in 
+                    # amino acids that are not CA atoms and set them as movable
+                    is_aa_mask = features.atom_resname.isin(RESNAME_3LETTER)
+                    is_ca_mask = (features.atom_name == 'CA').flatten()
+                    to_move_mask = is_aa_mask & ~is_ca_mask
+                    features.atom_movable_mask[to_move_mask] = True
+                else:
+                    raise ValueError(f"Invalid movable_atoms value: {movable_atoms}. "
+                                        "Must be 'none', 'all', 'noised', or 'noised_and_side_chains'.")
+                
+                ########################################
+                # INITIALIZE GRAPH AND TOKENIZE EDGES
+                ########################################
+                # since atoms are in their "final" positions before model input, we can now create the graph structure
+                features = self._make_graph_and_tokenize_edges(item, features, **kwargs)
             
+            else:  # ProteinData input
+                ########################################
+                # USE EXISTING PROTEIN DATA OBJECT
+                ########################################
+                # Clone the input ProteinData to avoid modifying the original
+                features = item.clone()
+                
+                # Initialize movable mask if not present
+                if features.atom_movable_mask is None:
+                    features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
+
+                # Set movable atoms according to specification
+                if movable_atoms == 'none':
+                    features.atom_movable_mask = torch.zeros(len(features.positions), dtype=torch.bool)
+                elif movable_atoms == 'all':
+                    features.atom_movable_mask = torch.ones(len(features.positions), dtype=torch.bool)
+                elif movable_atoms == 'noised':
+                    # Use existing noised mask if available, otherwise keep as zeros
+                    if features.atom_noised_mask is not None:
+                        features.atom_movable_mask = features.atom_noised_mask.clone()
+                elif movable_atoms == 'noised_and_side_chains':
+                    # Use existing noised mask and add side chains
+                    if features.atom_noised_mask is not None:
+                        features.atom_movable_mask = features.atom_noised_mask.clone()
+                    # Add side chain atoms
+                    if hasattr(features, 'atom_resname') and hasattr(features, 'atom_name'):
+                        is_aa_mask = features.atom_resname.isin(RESNAME_3LETTER)
+                        is_ca_mask = (features.atom_name == 'CA').flatten()
+                        to_move_mask = is_aa_mask & ~is_ca_mask
+                        features.atom_movable_mask[to_move_mask] = True
+                else:
+                    raise ValueError(f"Invalid movable_atoms value: {movable_atoms}. "
+                                        "Must be 'none', 'all', 'noised', or 'noised_and_side_chains'.")
+
             ########################################
             # NODE MASKING FOR MLM TASKS
             ########################################
@@ -891,9 +984,13 @@ class MetalSiteFeaturizer:
                     n_to_keep = round(n_to_mask * node_mlm_subrate_keep)
                     
                     # select indices to tweak and keep from the already masked indices
-                    masked_indices_random_perm = torch.randperm(indices_to_mask)
+                    masked_indices_random_perm = np.random.choice(
+                        list(indices_to_mask), 
+                        size=n_to_tweak + n_to_keep,
+                        replace=False
+                    )
                     indices_to_tweak = set(masked_indices_random_perm[:n_to_tweak].tolist())
-                    indices_to_keep = set(masked_indices_random_perm[n_to_tweak:n_to_tweak + n_to_keep].tolist())
+                    indices_to_keep = set(masked_indices_random_perm[n_to_tweak:].tolist())
                     # remove indices from mask that are in tweak or keep
                     indices_to_mask -= indices_to_tweak
                     indices_to_mask -= indices_to_keep
@@ -919,15 +1016,10 @@ class MetalSiteFeaturizer:
             # Append the featurized ProteinData object to the list
             featurized_data.append(features)
 
-        # reset the distances after we maybe screwed with them
-        if self.distances is None:
-            features.set_distances()
-
         # convert to BatchProteinData
-        batch_data = BatchProteinData.from_list(featurized_data)
+        batch_data = featurized_data
 
         return batch_data
-                
 
 
 

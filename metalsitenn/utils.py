@@ -434,8 +434,10 @@ def visualize_protein_data_3d(
     
     # Check for masked atoms from training data
     masked_atoms = []
-    if protein_data.atom_masked_mask is not None:
-        masked_atoms = protein_data.atom_masked_mask.squeeze(-1).bool()
+    # rely on above logic to determine if atoms are masked, thus atoms that were changed due to bert tweaking
+    # get the color the changed to
+    # if protein_data.atom_masked_mask is not None:
+    #     masked_atoms = protein_data.atom_masked_mask.squeeze(-1).bool()
     
     # Find neighbors of focus atom if specified
     focus_neighbors = set()
