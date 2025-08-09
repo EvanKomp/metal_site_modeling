@@ -783,6 +783,7 @@ class MetalSiteFeaturizer:
         movable_atoms: str = 'noised', # 'none', 'all', 'noised', 'noised_and_side_chains'
         # custom behavior eg. mutating
         mutations: Tuple[int, str] = None,  # (resid, new_resname) to mutate a residue
+        return_batched: bool=True,
         **kwargs
     ):
         """
@@ -1018,11 +1019,10 @@ class MetalSiteFeaturizer:
 
         # convert to BatchProteinData
         batch_data = featurized_data
+        if return_batched:
+            batch_data = BatchProteinData(featurized_data)
 
         return batch_data
-
-
-
 
     def get_feature_vocab_sizes(self) -> Dict[str, int]:
         """
@@ -1045,11 +1045,120 @@ class MetalSiteFeaturizer:
                 f"bond_features={self.bond_features})")
 
 
+class MetalSiteCollator:
+    """Collator for batching ProteinData objects with MetalSiteFeaturizer."""
     
-
-            
-
-                
+    def __init__(
+            self,
+            atom_features: List[str],
+            bond_features: List[str],
+            k: int=20,
+            custom_tokenizers_init: Dict[str, Tokenizer] = None,
+            # for node classification task
+            node_mlm_do: bool = False,
+            node_mlm_rate: float = 0.15,
+            node_mlm_subrate_tweak: float = 0.1,
+            node_mlm_subrate_keep: float = 0.1,
+            # for global classification task
+            metal_classification: bool = False,
+            metal_classification_include_special_tokens: bool = True,
+            # for residue collapsing / denoising
+            residue_collapse_do: bool = False,
+            residue_collapse_specific_residues: Union[List[Union[str, int]], str, int] = None,
+            residue_collapse_rate: float = 0.3,
+            residue_collapse_ca_fixed: bool = False,
+            residue_collapse_center_atom_noise_sigma: float = 0.5,
+            residue_collapse_limb_atom_noise_sigma: float = 0.2,
+            residue_collapse_other_atom_noise_sigma: float = None,
+            residue_collapse_time: Union[float, 'random', None] = None,  # 'random' or a float value
+            movable_atoms: str = 'noised', # 'none', 'all', 'noised', 'noised_and_side_chains'
+            **kwargs
+    ):
+        """
+        Initialize the collator with featurizer parameters.
         
+        Args:
+            atom_features: List of atom feature names
+            bond_features: List of bond feature names
+            k: Number of neighbors for graph construction
+            node_mlm_do: If True, apply MLM-style masking to nodes
+            node_mlm_rate: Probability of masking nodes for MLM training (0.0 to 1.0)
+            node_mlm_subrate_tweak: Probability of replacing masked nodes with random tokens (default 0.1)
+            node_mlm_subrate_keep: Probability of keeping original tokens (default 0.1)
+            metal_classification: If True, anonymize metals for global classification
+            metal_classification_include_special_tokens: Include special tokens in metal count vector
+            residue_collapse_do: If True, collapse specified residues and apply noising (Chain input only)
+            residue_collapse_specific_residues: Residue IDs to collapse (list of str/int or single str/int)
+            residue_collapse_rate: Probability of collapsing residues (0.0 to 1.0)
+            residue_collapse_ca_fixed: If True, keep CA atom fixed during collapse / noising
+            residue_collapse_center_atom_noise_sigma: Standard deviation for center atom noise
+            residue_collapse_limb_atom_noise_sigma: Standard deviation for limb atom noise
+            residue_collapse_other_atom_noise_sigma: Standard deviation for other atom noise
+            residue_collapse_time: Time component for flow labels ('random' or float)
+            movable_atoms: Specification of movable atoms during noising
+                - 'none': No atoms are movable
+                - 'all': All atoms are movable
+                - 'noised': Only noised atoms are movable
+                - 'noised_and_side_chains': Any side chain atom is movable in addition to noised atoms
+        """
+        self.featurizer = MetalSiteFeaturizer(
+            atom_features=atom_features,
+            bond_features=bond_features,
+            k=k,
+            custom_tokenizers_init=custom_tokenizers_init)
+        self.node_mlm_do = node_mlm_do
+        self.node_mlm_rate = node_mlm_rate
+        self.node_mlm_subrate_tweak = node_mlm_subrate_tweak
+        self.node_mlm_subrate_keep = node_mlm_subrate_keep
+        self.metal_classification = metal_classification
+        self.metal_classification_include_special_tokens = metal_classification_include_special_tokens
+        self.residue_collapse_do = residue_collapse_do
+        self.residue_collapse_specific_residues = residue_collapse_specific_residues
+        self.residue_collapse_rate = residue_collapse_rate
+        self.residue_collapse_ca_fixed = residue_collapse_ca_fixed
+        self.residue_collapse_center_atom_noise_sigma = residue_collapse_center_atom_noise_sigma
+        self.residue_collapse_limb_atom_noise_sigma = residue_collapse_limb_atom_noise_sigma
+        self.residue_collapse_other_atom_noise_sigma = residue_collapse_other_atom_noise_sigma
+        self.residue_collapse_time = residue_collapse_time
+        self.movable_atoms = movable_atoms
+        self.kwargs = kwargs
 
-    
+    def __call__(self, batch: List[Tuple[int, 'Chain']]) -> BatchProteinData:
+        """
+        Collate a batch of Chain objects into a BatchProteinData object.
+        
+        Args:
+            batch: List of tuples (index, Chain) to collate
+        Returns:
+            BatchProteinData object containing collated data
+        """
+        # Extract Chains from the batch
+        chains = [item[1] for item in batch]
+        pdb_ids = [item[0] for item in batch]
+        
+        # Featurize the Chains using the featurizer
+        featurized_data = self.featurizer(
+            chains,
+            node_mlm_do=self.node_mlm_do,
+            node_mlm_rate=self.node_mlm_rate,
+            node_mlm_subrate_tweak=self.node_mlm_subrate_tweak,
+            node_mlm_subrate_keep=self.node_mlm_subrate_keep,
+            metal_classification=self.metal_classification,
+            metal_classification_include_special_tokens=self.metal_classification_include_special_tokens,
+            residue_collapse_do=self.residue_collapse_do,
+            residue_collapse_specific_residues=self.residue_collapse_specific_residues,
+            residue_collapse_rate=self.residue_collapse_rate,
+            residue_collapse_ca_fixed=self.residue_collapse_ca_fixed,
+            residue_collapse_center_atom_noise_sigma=self.residue_collapse_center_atom_noise_sigma,
+            residue_collapse_limb_atom_noise_sigma=self.residue_collapse_limb_atom_noise_sigma,
+            residue_collapse_other_atom_noise_sigma=self.residue_collapse_other_atom_noise_sigma,
+            residue_collapse_time=self.residue_collapse_time,
+            movable_atoms=self.movable_atoms,
+            **self.kwargs
+        )
+
+        # set the pdb ids
+        pdb_ids = np.array(pdb_ids, dtype=object).reshape(-1, 1)  # Ensure shape is [N, 1]
+        setattr(featurized_data, 'pdb_id', pdb_ids)
+
+        return featurized_data

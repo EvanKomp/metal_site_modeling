@@ -81,16 +81,17 @@ class ProteinData:
     # chirals [O,4] O here is number of contraints, and 5 is the number if indexes required to specify the comstraint
 
     # global features
-    global_features: torch.Tensor=None  # [B, d]
-    time: torch.Tensor=None  # [B, 1] - time of the system, if applicable
+    global_features: torch.Tensor=None  # [1, d]
+    time: torch.Tensor=None  # [1, 1] - time of the system, if applicable
+    pdb_id: np.ndarray[str]=None  # [1, 1] - PDB identifier
 
     # attributes related to collating / loss calculation
     atom_masked_mask: torch.Tensor=None  # [N, 1] - mask for atoms that were masked
     element_labels: torch.Tensor=None  # [N, 1] - labels
     element_loss_weights: torch.Tensor=None # [N, 1] - per atom weights for element loss
 
-    global_labels: torch.Tensor=None  # [B, d] - labels for global tasks
-    global_loss_weights: torch.Tensor=None  # [B, d] - per example weights for global tasks
+    global_labels: torch.Tensor=None  # [1, d] - labels for global tasks
+    global_loss_weights: torch.Tensor=None  # [1, d] - per example weights for global tasks
 
     atom_noised_mask: torch.Tensor=None  # [N, 1] - mask for atoms that were noised
     position_flow_labels: torch.Tensor=None  # [N, 3] - labels for positions in flow tasks
@@ -280,7 +281,7 @@ class BatchProteinData:
     
     def _stack_numpy_attributes(self, protein_data_list: List[ProteinData]):
         """Stack numpy array attributes."""
-        numpy_fields = ['atom_name', 'atom_resname']
+        numpy_fields = ['atom_name', 'atom_resname', 'pdb_id']
         
         for field_name in numpy_fields:
             arrays = [getattr(p, field_name) for p in protein_data_list 
@@ -330,8 +331,6 @@ class BatchProteinData:
         
         self.topology = stacked_topology if stacked_topology else None
     
-    
-    
     def get(self, idx: int) -> ProteinData:
         """
         Get a single ProteinData instance from the batch.
@@ -346,6 +345,18 @@ class BatchProteinData:
             raise IndexError(f"Index {idx} out of range for batch size {self.batch_size}")
         
         return self.to_protein_data_list()[idx]
+    
+    def __getitem__(self, idx: int) -> ProteinData:
+        """
+        Get a single ProteinData instance using indexing.
+        
+        Args:
+            idx: Index of the sample to retrieve
+            
+        Returns:
+            ProteinData instance
+        """
+        return self.get(idx)
     
     def save(self, path: str) -> None:
         """
@@ -423,21 +434,28 @@ class BatchProteinData:
             # Extract atom-level data
             data = {}
             atom_fields = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'atom_movable_mask',
-                          'atom_resid', 'atom_ishetero', 'atom_masked_mask', 'element_labels', 
-                          'element_loss_weights', 'atom_noised_mask', 'position_flow_labels',
-                          'position_labels', 'position_loss_weights']
+                        'atom_resid', 'atom_ishetero', 'atom_masked_mask', 'element_labels', 
+                        'element_loss_weights', 'atom_noised_mask', 'position_flow_labels',
+                        'position_labels', 'position_loss_weights']
             
             for field_name in atom_fields:
                 attr = getattr(self, field_name, None)
                 if attr is not None:
                     data[field_name] = attr[atom_mask]
             
-            # Handle numpy arrays
+            # Handle atom-level numpy arrays (NOT pdb_id)
             numpy_fields = ['atom_name', 'atom_resname']
             for field_name in numpy_fields:
                 attr = getattr(self, field_name, None)
                 if attr is not None:
                     data[field_name] = attr[atom_mask.cpu().numpy()]
+            
+            # Handle global numpy arrays (like pdb_id)
+            global_numpy_fields = ['pdb_id']
+            for field_name in global_numpy_fields:
+                attr = getattr(self, field_name, None)
+                if attr is not None:
+                    data[field_name] = attr[i:i+1]  # Keep as [1,1] array
             
             # Handle edges
             if self.edge_index is not None:
