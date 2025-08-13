@@ -387,7 +387,7 @@ def visualize_protein_data_3d(
         raise ValueError("ProteinData must have element")
     
     # Validate velocities if provided
-    if velocities == 'flow':
+    if type(velocities) == str and velocities == 'flow':
         assert protein_data.position_flow_labels is not None, "ProteinData must have position_flow_labels for flow visualization"
         assert protein_data.time is not None, "ProteinData must have time for flow visualization"
         vectors = protein_data.position_flow_labels * (1 - protein_data.time.item())

@@ -14,7 +14,7 @@ import copy
 
 # Field constants
 TENSOR_FIELDS = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'atom_movable_mask',
-                'atom_resid', 'atom_ishetero', 'distances', 'bond_order', 'is_aromatic',
+                'atom_resid', 'atom_ishetero', 'distances', 'distance_vec', 'bond_order', 'is_aromatic',
                 'is_in_ring', 'edge_index', 'atom_masked_mask', 'element_labels', 
                 'element_loss_weights', 'atom_noised_mask', 'position_flow_labels',
                 'position_labels', 'position_loss_weights', 'global_features', 
@@ -27,7 +27,7 @@ ATOM_LEVEL_TENSOR_FIELDS = ['element', 'charge', 'nhyd', 'hyb', 'positions', 'at
 
 GLOBAL_TENSOR_FIELDS = ['global_features', 'time', 'global_labels', 'global_loss_weights']
 
-EDGE_TENSOR_FIELDS = ['distances', 'bond_order', 'is_aromatic', 'is_in_ring']
+EDGE_TENSOR_FIELDS = ['distances', 'bond_order', 'is_aromatic', 'is_in_ring', 'distance_vec']
 
 ATOM_LEVEL_NUMPY_FIELDS = ['atom_name', 'atom_resname']
 
@@ -88,6 +88,7 @@ class ProteinData:
 
     # edge info
     distances: torch.Tensor=None  # [E, 1] - distances between atoms
+    distance_vec: torch.Tensor=None  # [E, 3] - vector between atoms for edges
     bond_order: torch.Tensor=None # [E, 1]
     is_aromatic: torch.Tensor=None  # [E, 1]
     is_in_ring: torch.Tensor=None  # [E, 1]

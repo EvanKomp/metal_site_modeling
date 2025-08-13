@@ -195,6 +195,7 @@ class MetalSiteFeaturizer:
 
         # assign to ProteinData
         pdata.distances = distances
+        pdata.distance_vec = r[dst] - r[src]
         pdata.edge_index = edge_index
 
         return pdata
