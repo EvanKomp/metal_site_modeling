@@ -31,9 +31,10 @@ from fairchem.core.models.equiformer_v2.so3 import (
 )
 from fairchem.core.models.equiformer_v2.weight_initialization import eqv2_init_weights
 
-from .embeddings import NodeEmbedder, SO3ScalarEmbedder, EdgeDegreeEmbedding
+from .embedding import NodeEmbedder, SO3ScalarEmbedder, EdgeDegreeEmbedding
 from .topology import compute_positional_topology_gradients, SO3_L1_LinearMixing
 from .attention import TransBlockV2WithEdges
+from .film import SO3EquivariantFiLM
 
 with contextlib.suppress(ImportError):
     pass
@@ -137,6 +138,11 @@ class EquiformerWEdgesBackbone(nn.Module):
         proj_drop: float = 0.0,
         weight_init: str = "uniform",
         max_radius: float = 5.0,  # Used for distance_expansion range
+        use_time: bool = False, # whether to expect time tensors and use FiLM to modulate the model
+        film_time_embedding_dim: int = 128,  # Dimension for time embedding in FiLM
+        film_hidden_dim: int = 256,  # Hidden dimension for FiLM MLP
+        film_mlp_layers: int = 3,  # Number of layers in FiLM MLP
+        film_num_gaussians: int = 50,  # Number of gaussian basis functions for time smearing
         # Enhanced molecular feature parameters
         feature_vocab_sizes: Optional[Dict[str, int]] = None,
         atom_features: Optional[List[str]] = None,
@@ -190,6 +196,12 @@ class EquiformerWEdgesBackbone(nn.Module):
         self.proj_drop = proj_drop
         self.weight_init = weight_init
         self.max_radius = max_radius
+        self.use_time = use_time
+        self.film_time_embedding_dim = film_time_embedding_dim
+        self.film_hidden_dim = film_hidden_dim
+        self.film_mlp_layers = film_mlp_layers
+        self.film_num_gaussians = film_num_gaussians
+
         
         # Store enhanced feature parameters
         self.feature_vocab_sizes = feature_vocab_sizes or {}
@@ -224,6 +236,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         self._init_enhanced_embeddings()
         self._init_normalization_layers()
         self._init_enhanced_transformer_blocks()
+        self._init_film()
         
         if self.use_topology_gradients:
             self._init_topology_mixing()
@@ -418,6 +431,24 @@ class EquiformerWEdgesBackbone(nn.Module):
             in_channels_list=[self.sphere_channels_all, 3],  # SO3 L1 + topology gradients
             out_channels=self.sphere_channels_all
         )
+
+    def _init_film(self):
+        if not self.use_time:
+            self.film = None
+            return
+        else:
+            self.film = SO3EquivariantFiLM(
+                lmax_list=self.lmax_list,
+                mmax_list=self.mmax_list,
+                num_channels=self.sphere_channels_all,
+                num_layers=self.num_layers + 1,  # +1 for input embeddings before first layer
+                time_embedding_dim=self.film_time_embedding_dim,
+                hidden_dim=self.film_hidden_dim,
+                mlp_layers=self.film_mlp_layers,
+                num_gaussians=self.film_num_gaussians,
+                sigma_min=0.0,
+                sigma_max=1.0,
+            )
     
     def _extract_feature_dict(self, data: 'BatchProteinData') -> Dict[str, torch.Tensor]:
         """Extract molecular features from BatchProteinData into dictionary format."""
@@ -546,7 +577,27 @@ class EquiformerWEdgesBackbone(nn.Module):
                 
                 # Update L1 features in embedding
                 node_embedding.embedding[:, 1:4, :] = mixed_l1_features
-        
+
+        ###############################################################
+        # Apply FiLM modulation if time is provided
+        ###############################################################
+        if self.use_time:
+            assert data.time is not None, "Time tensor must be provided for FiLM modulation"
+            assert data.batch is not None, "Batch tensor must be provided for FiLM modulation"
+            # Get FiLM modulation coefficients per spherical harmonic per layer
+            time_coefficient_weights = self.film.time_embedding(data.time) # [N layers + 1, batch_size, (lmax + 1)^2, d]
+
+            # Apply FiLM modulation to input
+            coef_weights = time_coefficient_weights[0]  # First layer coefficients [batch_size, (lmax + 1)^2, d]
+            # expand from batch size to num atoms respecting which atom is from which graph
+            batch_indicators = data.batch # [N atoms, indicator up to B]
+            assert batch_indicators.size() == (num_atoms,)
+            batch_size = batch_indicators.max().item() + 1
+            coef_weights = coef_weights[batch_indicators]  # [N atoms, (lmax + 1)^2, d], eg. gamma
+
+            # Apply FiLM modulation to node embeddings
+            node_embedding.embedding = coef_weights * node_embedding.embedding
+
         ###############################################################
         # Transformer blocks with enhanced edge information
         ###############################################################
@@ -560,6 +611,15 @@ class EquiformerWEdgesBackbone(nn.Module):
                 batch=data.batch if hasattr(data, 'batch') else None,
                 node_offset=0,
             )
+
+            # time modulation
+            if self.use_time:
+                # Get FiLM modulation coefficients for this layer
+                coef_weights = time_coefficient_weights[i + 1]  # i+1 because first layer is input embedding
+                # expand from batch size to num atoms respecting which atom is from which graph
+                coef_weights = coef_weights[batch_indicators]  # [N atoms, (lmax + 1)^2, d], eg. gamma
+                # Apply FiLM modulation to node embeddings
+                node_embedding.embedding = coef_weights * node_embedding.embedding
         
         # Final output normalization
         node_embedding.embedding = self.norm_final(node_embedding.embedding)

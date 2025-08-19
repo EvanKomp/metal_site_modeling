@@ -36,7 +36,7 @@ from fairchem.core.models.equiformer_v2.so2_ops import SO2_Convolution
 from fairchem.core.models.equiformer_v2.so3 import SO3_Embedding, SO3_LinearV2
 from fairchem.core.models.equiformer_v2.transformer_block import FeedForwardNetwork
 
-from .embeddings import EdgeProjector
+from .embedding import EdgeProjector
 
 
 class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
@@ -44,6 +44,10 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
     SO2EquivariantGraphAttention: Perform MLP attention + non-linear message passing
         SO(2) Convolution with radial function -> S2 Activation -> SO(2) Convolution -> attention weights and non-linear messages
         attention weights * non-linear messages -> Linear
+
+    Modification of: https://github.com/facebookresearch/fairchem/blob/977a80328f2be44649b414a9907a1d6ef2f81e95/src/fairchem/core/models/equiformer_v2/transformer_block.py#L25
+    There, invariant edge features used for weighing the messages is a function of only the distance or the distance plus fresh
+    embeddings of atomic numbers of src and dst nodes. Here we allow for fresh embeddings of ALL src and dst node features AND embeddings of edge features.
 
     Args:
         sphere_channels: Number of spherical channels
@@ -415,6 +419,9 @@ class TransBlockV2WithEdges(nn.Module):
     """
     Updated TransBlockV2 that leverages SO2EquivariantGraphAttentionWEdgesV2 
     for enhanced edge information processing.
+
+    Adapted from: https://github.com/facebookresearch/fairchem/blob/977a80328f2be44649b414a9907a1d6ef2f81e95/src/fairchem/core/models/equiformer_v2/transformer_block.py#L514
+    Difference being the SO2 graph attention portions, outlined above, that now use all node and edge features in invariant edge embeddings.
 
     Args:
         sphere_channels: Number of spherical channels
