@@ -91,24 +91,24 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
         attn_alpha_channels: int,
         attn_value_channels: int,
         output_channels: int,
-        lmax_list: List[int],
-        mmax_list: List[int],
+        lmax_list: list[int],
+        mmax_list: list[int],
         SO3_rotation,
         mappingReduced,
         SO3_grid,
-        edge_channels_list: List[int],
+        edge_channels_list,
         use_m_share_rad: bool = False,
         # EdgeProjector parameters
         use_edge_information: bool = True,
         radial_basis_size: int = 50,
-        feature_vocab_sizes: Optional[Dict[str, int]] = None,
+        feature_vocab_sizes: Dict[str, int] = None,
         use_edge_features: bool = True,
-        bond_features: Optional[List[str]] = None,
+        bond_features: List[str] = None,
         use_node_features: bool = True,
-        node_features: Optional[List[str]] = None,
+        node_features: List[str] = None,
         embedding_dim: int = 32,
         embedding_use_bias: bool = True,
-        activation: str = "scaled_silu", # does nothing, maybe FFNN was attached to this at one point
+        activation="scaled_silu",
         use_s2_act_attn: bool = False,
         use_attn_renorm: bool = True,
         use_gate_act: bool = False,
@@ -219,20 +219,20 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
             self.alpha_dot = None
         else:
             if self.use_attn_renorm:
-                self.alpha_norm = nn.LayerNorm(self.attn_alpha_channels)
+                self.alpha_norm = torch.nn.LayerNorm(self.attn_alpha_channels)
             else:
-                self.alpha_norm = nn.Identity()
+                self.alpha_norm = torch.nn.Identity()
             self.alpha_act = SmoothLeakyReLU()
-            self.alpha_dot = nn.Parameter(
+            self.alpha_dot = torch.nn.Parameter(
                 torch.randn(self.num_heads, self.attn_alpha_channels)
             )
             # torch_geometric.nn.inits.glorot(self.alpha_dot) # Following GATv2
             std = 1.0 / math.sqrt(self.attn_alpha_channels)
-            nn.init.uniform_(self.alpha_dot, -std, std)
+            torch.nn.init.uniform_(self.alpha_dot, -std, std)
 
         self.alpha_dropout = None
         if alpha_drop != 0.0:
-            self.alpha_dropout = nn.Dropout(alpha_drop)
+            self.alpha_dropout = torch.nn.Dropout(alpha_drop)
 
         if self.use_gate_act:
             self.gate_act = GateActivation(
@@ -273,10 +273,10 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
 
     def forward(
         self,
-        x: SO3_Embedding,
+        x: torch.Tensor,
         edge_distance: torch.Tensor,
-        edge_index: torch.Tensor,
-        feature_dict: Optional[Dict[str, torch.Tensor]] = None,
+        edge_index,
+        feature_dict: Dict[str, torch.Tensor] = None,
         node_offset: int = 0,
     ):
         """
@@ -306,8 +306,8 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
             x_full = gp_utils.gather_from_model_parallel_region(x.embedding, dim=0)
             x_source.set_embedding(x_full)
             x_target.set_embedding(x_full)
-        x_source._expand_edge(edge_index[0])
-        x_target._expand_edge(edge_index[1])
+        x_source._expand_edge(edge_index[:,0])
+        x_target._expand_edge(edge_index[:,1])
 
         x_message_data = torch.cat((x_source.embedding, x_target.embedding), dim=2)
         x_message = SO3_Embedding(
@@ -384,7 +384,7 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
             x_0_alpha = self.alpha_norm(x_0_alpha)
             x_0_alpha = self.alpha_act(x_0_alpha)
             alpha = torch.einsum("bik, ik -> bi", x_0_alpha, self.alpha_dot)
-        alpha = torch_geometric.utils.softmax(alpha, edge_index[1])
+        alpha = torch_geometric.utils.softmax(alpha, edge_index[:,1])
         alpha = alpha.reshape(alpha.shape[0], 1, self.num_heads, 1)
         if self.alpha_dropout is not None:
             alpha = self.alpha_dropout(alpha)
@@ -409,58 +409,60 @@ class SO2EquivariantGraphAttentionWEdgesV2(nn.Module):
         x_message._rotate_inv(self.SO3_rotation, self.mappingReduced)
 
         # Compute the sum of the incoming neighboring messages for each target node
-        x_message._reduce_edge(edge_index[1] - node_offset, len(x.embedding))
+        x_message._reduce_edge(edge_index[:,1] - node_offset, len(x.embedding))
 
         # Project
         return self.proj(x_message)
 
 
-class TransBlockV2WithEdges(nn.Module):
+class TransBlockV2WithEdges(torch.nn.Module):
     """
     Updated TransBlockV2 that leverages SO2EquivariantGraphAttentionWEdgesV2 
     for enhanced edge information processing.
 
-    Adapted from: https://github.com/facebookresearch/fairchem/blob/977a80328f2be44649b414a9907a1d6ef2f81e95/src/fairchem/core/models/equiformer_v2/transformer_block.py#L514
-    Difference being the SO2 graph attention portions, outlined above, that now use all node and edge features in invariant edge embeddings.
-
     Args:
-        sphere_channels: Number of spherical channels
-        attn_hidden_channels: Number of hidden channels used during SO(2) graph attention
-        num_heads: Number of attention heads
-        attn_alpha_channels: Number of channels for alpha vector in each attention head
-        attn_value_channels: Number of channels for value vector in each attention head
-        ffn_hidden_channels: Number of hidden channels used during feedforward network
-        output_channels: Number of output channels
-        lmax_list: List of degrees (l) for each resolution
-        mmax_list: List of orders (m) for each resolution
+        sphere_channels (int): Number of spherical channels
+        attn_hidden_channels (int): Number of hidden channels used during SO(2) graph attention
+        num_heads (int): Number of attention heads
+        attn_alpha_channels (int): Number of channels for alpha vector in each attention head
+        attn_value_channels (int): Number of channels for value vector in each attention head
+        ffn_hidden_channels (int): Number of hidden channels used during feedforward network
+        output_channels (int): Number of output channels
+
+        lmax_list (list[int]): List of degrees (l) for each resolution
+        mmax_list (list[int]): List of orders (m) for each resolution
+
         SO3_rotation: Class to calculate Wigner-D matrices and rotate embeddings
         mappingReduced: Class to convert l and m indices once node embedding is rotated
         SO3_grid: Class used to convert from grid the spherical harmonic representations
-        edge_channels_list: List of sizes of invariant edge embedding
-        use_m_share_rad: Whether all m components within a type-L vector share radial weights
-        
+
+        edge_channels_list (list[int]): List of sizes of invariant edge embedding
+        use_m_share_rad (bool): Whether all m components within a type-L vector share radial weights
+
         # EdgeProjector parameters for enhanced edge information
-        use_edge_information: Whether to use edge information in the attention mechanism
-        radial_basis_size: Number of radial basis functions expected
-        feature_vocab_sizes: Dictionary mapping feature names to vocab sizes
-        use_edge_features: Whether to use edge features
-        bond_features: List of bond feature names to use if using any
-        use_node_features: Whether to use node features in edge projector
-        node_features: List of node feature names to use if using any
-        embedding_dim: Embedding dimension for node and edge features
-        embedding_use_bias: Whether to use bias in the embedding layers
-        
-        attn_activation: Type of activation function for SO(2) graph attention
-        use_s2_act_attn: Whether to use attention after S2 activation
-        use_attn_renorm: Whether to re-normalize attention weights
-        ffn_activation: Type of activation function for feedforward network
-        use_gate_act: If `True`, use gate activation. Otherwise, use S2 activation
-        use_grid_mlp: If `True`, use projecting to grids and performing MLPs for FFN
-        use_sep_s2_act: If `True`, use separable S2 activation when `use_gate_act` is False
-        norm_type: Type of normalization layer (['layer_norm', 'layer_norm_sh'])
-        alpha_drop: Dropout rate for attention weights
-        drop_path_rate: Drop path rate
-        proj_drop: Dropout rate for outputs of attention and FFN
+        use_edge_information (bool): Whether to use edge information in the attention mechanism
+        radial_basis_size (int): Number of radial basis functions expected
+        feature_vocab_sizes (Dict[str, int]): Dictionary mapping feature names to vocab sizes
+        use_edge_features (bool): Whether to use edge features
+        bond_features (List[str]): List of bond feature names to use if using any
+        use_node_features (bool): Whether to use node features in edge projector
+        node_features (List[str]): List of node feature names to use if using any
+        embedding_dim (int): Embedding dimension for node and edge features
+        embedding_use_bias (bool): Whether to use bias in the embedding layers
+
+        attn_activation (str): Type of activation function for SO(2) graph attention
+        use_s2_act_attn (bool): Whether to use attention after S2 activation
+        use_attn_renorm (bool): Whether to re-normalize attention weights
+        ffn_activation (str): Type of activation function for feedforward network
+        use_gate_act (bool): If `True`, use gate activation. Otherwise, use S2 activation
+        use_grid_mlp (bool): If `True`, use projecting to grids and performing MLPs for FFN
+        use_sep_s2_act (bool): If `True`, use separable S2 activation when `use_gate_act` is False
+
+        norm_type (str): Type of normalization layer (['layer_norm', 'layer_norm_sh'])
+
+        alpha_drop (float): Dropout rate for attention weights
+        drop_path_rate (float): Drop path rate
+        proj_drop (float): Dropout rate for outputs of attention and FFN
     """
 
     def __init__(
@@ -472,21 +474,21 @@ class TransBlockV2WithEdges(nn.Module):
         attn_value_channels: int,
         ffn_hidden_channels: int,
         output_channels: int,
-        lmax_list: List[int],
-        mmax_list: List[int],
+        lmax_list: list[int],
+        mmax_list: list[int],
         SO3_rotation,
         mappingReduced,
         SO3_grid,
-        edge_channels_list: List[int],
+        edge_channels_list: list[int],
         use_m_share_rad: bool = False,
         # EdgeProjector parameters
         use_edge_information: bool = True,
         radial_basis_size: int = 50,
-        feature_vocab_sizes: Optional[Dict[str, int]] = None,
+        feature_vocab_sizes: Dict[str, int] = None,
         use_edge_features: bool = True,
-        bond_features: Optional[List[str]] = None,
+        bond_features: List[str] = None,
         use_node_features: bool = True,
-        node_features: Optional[List[str]] = None,
+        node_features: List[str] = None,
         embedding_dim: int = 32,
         embedding_use_bias: bool = True,
         # Other parameters matching original TransBlockV2
@@ -590,11 +592,11 @@ class TransBlockV2WithEdges(nn.Module):
 
     def forward(
         self,
-        x: SO3_Embedding,
+        x,  # SO3_Embedding
         edge_distance: torch.Tensor,
         edge_index: torch.Tensor,
         feature_dict: Dict[str, torch.Tensor],
-        batch: Optional[torch.Tensor] = None,  # for GraphDropPath
+        batch=None,  # for GraphDropPath
         node_offset: int = 0,
     ):
         """

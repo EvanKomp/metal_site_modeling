@@ -177,7 +177,6 @@ class EquiformerWEdgesBackbone(nn.Module):
         self.ffn_hidden_channels = ffn_hidden_channels
         self.norm_type = norm_type
         self.lmax_list = lmax_list or [6]
-        self.mmax_list = mmax_list or [2]
         self.grid_resolution = grid_resolution
         self.num_sphere_samples = num_sphere_samples
         self.num_distance_basis = num_distance_basis
@@ -227,6 +226,7 @@ class EquiformerWEdgesBackbone(nn.Module):
             max_num_elements=max_num_elements,
             use_atom_edge_embedding=use_atom_edge_embedding,
             share_atom_edge_embedding=share_atom_edge_embedding,
+            mmax_list=mmax_list,  # Use provided mmax_list or derive from lmax_list
             **kwargs
         )
         
@@ -255,6 +255,7 @@ class EquiformerWEdgesBackbone(nn.Module):
             'max_num_elements': 'Element vocabulary determined by feature_vocab_sizes["element"]',
             'use_atom_edge_embedding': 'Atom-edge embedding replaced by enhanced molecular feature embedding',
             'share_atom_edge_embedding': 'Embedding sharing replaced by enhanced molecular feature embedding',
+            'mmax_list': 'Mmax list is now derived from lmax list'
         }
         
         for param_name, reason in ignored_params.items():
@@ -270,6 +271,7 @@ class EquiformerWEdgesBackbone(nn.Module):
                     'max_num_elements': 90,
                     'use_atom_edge_embedding': True,
                     'share_atom_edge_embedding': False,
+                    'mmax_list': None
                 }
                 
                 if param_value != default_values.get(param_name):
@@ -290,7 +292,7 @@ class EquiformerWEdgesBackbone(nn.Module):
     def _init_so3_components(self):
         """Initialize SO3 components (same as EquiformerV2Backbone)."""
         # Coefficient mapping
-        self.mappingReduced = CoefficientMappingModule(self.lmax_list, self.mmax_list)
+        self.mappingReduced = CoefficientMappingModule(self.lmax_list, self.lmax_list)
         
         # SO3 rotation modules
         self.SO3_rotation = nn.ModuleList()
@@ -350,7 +352,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         self.edge_deg_embedding = EdgeDegreeEmbedding(
             sphere_channels=self.sphere_channels,
             lmax_list=self.lmax_list,
-            mmax_list=self.mmax_list,
+            mmax_list=self.lmax_list,
             SO3_rotation=self.SO3_rotation,
             mappingReduced=self.mappingReduced,
             radial_basis_size=self.num_distance_basis,
@@ -394,7 +396,7 @@ class EquiformerWEdgesBackbone(nn.Module):
                 ffn_hidden_channels=self.ffn_hidden_channels,
                 output_channels=self.sphere_channels,
                 lmax_list=self.lmax_list,
-                mmax_list=self.mmax_list,
+                mmax_list=self.lmax_list,
                 SO3_rotation=self.SO3_rotation,
                 mappingReduced=self.mappingReduced,
                 SO3_grid=self.SO3_grid,
@@ -439,7 +441,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         else:
             self.film = SO3EquivariantFiLM(
                 lmax_list=self.lmax_list,
-                mmax_list=self.mmax_list,
+                mmax_list=self.lmax_list,
                 num_channels=self.sphere_channels_all,
                 num_layers=self.num_layers + 1,  # +1 for input embeddings before first layer
                 time_embedding_dim=self.film_time_embedding_dim,
@@ -585,7 +587,7 @@ class EquiformerWEdgesBackbone(nn.Module):
             assert data.time is not None, "Time tensor must be provided for FiLM modulation"
             assert data.batch is not None, "Batch tensor must be provided for FiLM modulation"
             # Get FiLM modulation coefficients per spherical harmonic per layer
-            time_coefficient_weights = self.film.time_embedding(data.time) # [N layers + 1, batch_size, (lmax + 1)^2, d]
+            time_coefficient_weights = self.film(data.time) # [N layers + 1, batch_size, (lmax + 1)^2, d]
 
             # Apply FiLM modulation to input
             coef_weights = time_coefficient_weights[0]  # First layer coefficients [batch_size, (lmax + 1)^2, d]

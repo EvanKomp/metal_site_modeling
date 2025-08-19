@@ -224,28 +224,28 @@ class EdgeProjector(nn.Module):
     have beyond just the distance and atomic identity.
 
     Args:
-        radial_basis_size: Size of RBF expected
-        feature_vocab_sizes: Dictionary mapping feature names to vocab sizes
-        use_edge_features: Whether to use edge features
-        bond_features: List of bond feature names to use
-        use_node_features: Whether to use node features
-        node_features: List of node feature names to use
-        output_dim: Output dimension for the edge embeddings
-        embedding_dim: Embedding dimension for node and edge features from NodeEmbedder and EdgeEmbedder
-        embedding_use_bias: Whether to use bias in the embedding layers
-        use_projector: Whether to use radial function projector
-        projector_hidden_layers: Number of hidden layers in the projector Radial func
-        projector_size: Output size of the projector Radial func
+        radial_basis_size (int): Size of RBF expected
+        feature_vocab_sizes (Dict[str, int]): Dictionary mapping feature names to vocab sizes
+        use_edge_features (bool): Whether to use edge features
+        bond_features (List[str]): List of bond feature names to use
+        use_node_features (bool): Whether to use node features
+        node_features (List[str]): List of node feature names to use
+        output_dim (int): Output dimension for the edge embeddings
+        embedding_dim (int): Embedding dimension for node and edge features from NodeEmbedder and EdgeEmbedder
+        embedding_use_bias (bool): Whether to use bias in the embedding layers
+        projector_hidden_layers (int): Number of hidden layers in the projector Radial func
+        projector_output_size (int): Output size of the projector Radial func
+
     """
     
     def __init__(
         self,
         radial_basis_size: int,
-        feature_vocab_sizes: Dict[str, int] = None,
-        use_edge_features: bool = True,
-        bond_features: List[str] = None,
-        use_node_features: bool = True,
-        node_features: List[str] = None,
+        feature_vocab_sizes: Dict[str, int]={},
+        use_edge_features: bool=True,
+        bond_features: List[str]=['bond_order', 'is_in_ring', 'is_aromatic'],
+        use_node_features: bool=True,
+        node_features: List[str]=['element', 'charge', 'nhyd', 'hyb'],
         output_dim: int = 64,
         embedding_dim: int = 32,
         embedding_use_bias: bool = True,
@@ -254,14 +254,6 @@ class EdgeProjector(nn.Module):
         projector_size: int = 64
     ):
         super().__init__()
-
-        # Set defaults
-        if feature_vocab_sizes is None:
-            feature_vocab_sizes = {}
-        if bond_features is None:
-            bond_features = ['bond_order', 'is_in_ring', 'is_aromatic']
-        if node_features is None:
-            node_features = ['element', 'charge', 'nhyd', 'hyb']
 
         self.radial_basis_size = radial_basis_size
         self.feature_vocab_sizes = feature_vocab_sizes
@@ -308,7 +300,7 @@ class EdgeProjector(nn.Module):
         else:
             self.edge_embedding = None
 
-        # get the expected input size for the radial function
+        # get the epected input size for the radial function
         input_size = radial_basis_size
         if self.use_edge_features:
             input_size += embedding_dim
@@ -326,24 +318,10 @@ class EdgeProjector(nn.Module):
 
     def forward(
         self,
-        R: torch.Tensor,  # [E, radial_basis_size]
-        edge_index: torch.Tensor,  # [E,2]
-        feature_dict: Dict[str, torch.Tensor] = None,
+        R: torch.Tensor, # [E, radial_basis_size]
+        edge_index: torch.Tensor, # [E,2]
+        feature_dict: Dict[str, torch.Tensor]={},
     ):
-        """
-        Project edge features to target dimension.
-        
-        Args:
-            R: Radial basis function expansion of distances [E, radial_basis_size]
-            edge_index: Edge indices [E, 2]
-            feature_dict: Dictionary of node and edge features
-            
-        Returns:
-            Edge embeddings of shape [E, output_dim] or [E, input_size] if no projector
-        """
-        if feature_dict is None:
-            feature_dict = {}
-            
         to_concat = []
         # radial basis distance
         to_concat.append(R)
@@ -369,66 +347,64 @@ class EdgeProjector(nn.Module):
         if self.use_projector:
             # pass through radial function
             output = self.radial_func(concatenated)
+
             return output
         else:
             return concatenated
 
 
-class EdgeDegreeEmbedding(nn.Module):
+class EdgeDegreeEmbedding(torch.nn.Module):
     """
-    Enhanced edge degree embedding that incorporates molecular features.
-    
-    Modified from Equiformer's EdgeDegreeEmbedding to use EdgeProjector for
-    richer edge feature processing including distance, node attributes, and edge attributes.
 
     Args:
-        sphere_channels: Number of spherical channels
-        lmax_list: List of degrees (l) for each resolution
-        mmax_list: List of orders (m) for each resolution
-        SO3_rotation: Class to calculate Wigner-D matrices and rotate embeddings
-        mappingReduced: Class to convert l and m indices once node embedding is rotated
-        radial_basis_size: Number of radial basis functions expected
-        feature_vocab_sizes: Dictionary mapping feature names to vocab sizes
-        use_edge_features: Whether to use edge features
-        bond_features: List of bond feature names to use if using any
-        use_node_features: Whether to use node features
-        node_features: List of node feature names to use if using any
-        embedding_dim: Embedding dimension for node and edge features
-        embedding_use_bias: Whether to use bias in the embedding layers
-        projector_hidden_layers: Number of hidden layers in the projector Radial func
-        projector_size: Hidden layer size of the projector Radial func
-        rescale_factor: Rescale the sum aggregation
+        sphere_channels (int):      Number of spherical channels
+
+        lmax_list (list:int):       List of degrees (l) for each resolution
+        mmax_list (list:int):       List of orders (m) for each resolution
+
+        SO3_rotation (list:SO3_Rotation): Class to calculate Wigner-D matrices and rotate embeddings
+        mappingReduced (CoefficientMappingModule): Class to convert l and m indices once node embedding is rotated
+
+        DEPRECATED, using EdgeProjector instead
+        # max_num_elements (int):     Maximum number of atomic numbers
+        # edge_channels_list (list:int):  List of sizes of invariant edge embedding. For example, [input_channels, hidden_channels, hidden_channels].
+                                        The last one will be used as hidden size when `use_atom_edge_embedding` is `True`.
+        # use_atom_edge_embedding (bool): Whether to use atomic embedding along with relative distance for edge scalar features
+        radial_basis_size (int):     Number of radial basis functions expected
+        feature_vocab_sizes (list:int): List of sizes of feature vocabularies
+        use_edge_features (bool):    Whether to use edge features
+        bond_features (list:str): List of bond feature names to use if using any
+        use_node_features (bool): Whether to use node features
+        node_features (list:str): List of node feature names to use if using any
+        embedding_dim (int):        Embedding dimension for node and edge features
+        embedding_use_bias (bool):  Whether to use bias in the embedding layers
+        projector_hidden_layers (int): Number of hidden layers in the projector Radial func
+        projector_size (int):       Hidden layer size of the projector Radial func
+        NOTE: Output size of radial func is determined by number of m0 coefficients available.
+
+        rescale_factor (float):     Rescale the sum aggregation
     """
 
     def __init__(
         self,
         sphere_channels: int,
-        lmax_list: List[int],
-        mmax_list: List[int],
+        lmax_list: list[int],
+        mmax_list: list[int],
         SO3_rotation,
         mappingReduced,
         radial_basis_size: int,
-        feature_vocab_sizes: Dict[str, int] = None,
-        use_edge_features: bool = True,
-        bond_features: List[str] = None,
-        use_node_features: bool = True,
-        node_features: List[str] = None,
-        embedding_dim: int = 128,
-        embedding_use_bias: bool = True,
-        projector_hidden_layers: int = 2,
-        projector_size: int = 64,
-        rescale_factor: float = 1.0,
+        feature_vocab_sizes: Dict[str, int]={},
+        use_edge_features: bool=True,
+        bond_features: List[str]=['bond_order', 'is_in_ring', 'is_aromatic'],
+        use_node_features: bool=True,
+        node_features: List[str]=['atomic_number', 'formal_charge'],
+        embedding_dim: int=128,
+        embedding_use_bias: bool=True,
+        projector_hidden_layers: int=2,
+        projector_size: int=64,
+        rescale_factor: float=1.0,
     ):
         super().__init__()
-        
-        # Set defaults
-        if feature_vocab_sizes is None:
-            feature_vocab_sizes = {}
-        if bond_features is None:
-            bond_features = ['bond_order', 'is_in_ring', 'is_aromatic']
-        if node_features is None:
-            node_features = ['element', 'charge', 'nhyd', 'hyb']
-            
         self.sphere_channels = sphere_channels
         self.lmax_list = lmax_list
         self.mmax_list = mmax_list
@@ -462,25 +438,22 @@ class EdgeDegreeEmbedding(nn.Module):
         edge_distance_rbf: torch.Tensor,
         edge_index: torch.Tensor, 
         num_nodes: int, 
-        feature_dict: Dict[str, torch.Tensor] = None,
+        feature_dict: Dict[str, torch.Tensor] = {},
         node_offset: int = 0
     ):
         """
         Forward pass for edge degree embedding.
         
         Args:
-            edge_distance_rbf: Radial basis function expansion of edge distances [E, radial_basis_size]
-            edge_index: Edge indices [2, E]
-            num_nodes: Number of nodes in the graph
-            feature_dict: Dictionary containing node and edge features
-            node_offset: Offset for node indices (default: 0)
+            edge_distance_rbf (torch.Tensor): Radial basis function expansion of edge distances [E, radial_basis_size]
+            edge_index (torch.Tensor): Edge indices [2, E]
+            num_nodes (int): Number of nodes in the graph
+            feature_dict (Dict[str, torch.Tensor]): Dictionary containing node and edge features
+            node_offset (int): Offset for node indices (default: 0)
             
         Returns:
             SO3_Embedding: Edge embedding in SO3 format
         """
-        if feature_dict is None:
-            feature_dict = {}
-            
         # Use EdgeProjector to compute edge features including distance, node features, and edge features
         x_edge_m_0 = self.rad_func(edge_distance_rbf, edge_index, feature_dict)
         
@@ -518,7 +491,7 @@ class EdgeDegreeEmbedding(nn.Module):
         x_edge_embedding._rotate_inv(self.SO3_rotation, self.mappingReduced)
 
         # Compute the sum of the incoming neighboring messages for each target node
-        x_edge_embedding._reduce_edge(edge_index[1] - node_offset, num_nodes)
+        x_edge_embedding._reduce_edge(edge_index[:,1] - node_offset, num_nodes)
         x_edge_embedding.embedding = x_edge_embedding.embedding / self.rescale_factor
 
         return x_edge_embedding
