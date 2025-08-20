@@ -420,6 +420,8 @@ class TransBlockV2WithEdges(torch.nn.Module):
     Updated TransBlockV2 that leverages SO2EquivariantGraphAttentionWEdgesV2 
     for enhanced edge information processing.
 
+    FiLM modulations are applied after the first layer norm.
+
     Args:
         sphere_channels (int): Number of spherical channels
         attn_hidden_channels (int): Number of hidden channels used during SO(2) graph attention
@@ -463,6 +465,7 @@ class TransBlockV2WithEdges(torch.nn.Module):
         alpha_drop (float): Dropout rate for attention weights
         drop_path_rate (float): Drop path rate
         proj_drop (float): Dropout rate for outputs of attention and FFN
+        use_time (bool): Whether to use time embeddings for FiLM modulation 
     """
 
     def __init__(
@@ -503,6 +506,7 @@ class TransBlockV2WithEdges(torch.nn.Module):
         alpha_drop: float = 0.0,
         drop_path_rate: float = 0.0,
         proj_drop: float = 0.0,
+        use_time: bool=False
     ) -> None:
         super().__init__()
 
@@ -590,12 +594,15 @@ class TransBlockV2WithEdges(torch.nn.Module):
         else:
             self.ffn_shortcut = None
 
+        self.use_time = use_time
+
     def forward(
         self,
         x,  # SO3_Embedding
         edge_distance: torch.Tensor,
         edge_index: torch.Tensor,
         feature_dict: Dict[str, torch.Tensor],
+        film_coefs=None,  # Optional time embedding for FiLM
         batch=None,  # for GraphDropPath
         node_offset: int = 0,
     ):
@@ -607,12 +614,16 @@ class TransBlockV2WithEdges(torch.nn.Module):
             edge_distance: [E, radial_basis_size] radial basis encoded distances
             edge_index: [2, E] edge connectivity
             feature_dict: Dictionary of additional node/edge features for EdgeProjector
+            time: Optional time embedding for FiLM (if used), shape [B, (l+1)^2, d]
             batch: Batch information for GraphDropPath
             node_offset: Node offset for distributed computing
             
         Returns:
             SO3_Embedding: Updated node embeddings
         """
+        if self.use_time:
+            assert film_coefs is not None, "Time embedding must be provided when use_time is True"
+
         output_embedding = x.clone()
 
         # Store residual connection for attention
@@ -620,6 +631,20 @@ class TransBlockV2WithEdges(torch.nn.Module):
 
         # Pre-attention normalization
         output_embedding.embedding = self.norm_1(output_embedding.embedding)
+
+        # film here
+        if self.use_time:
+            assert batch is not None, "Batch information must be provided when use_time is True"
+            # expand using batch
+            batch_size = batch.max().item() + 1
+            assert film_coefs.shape[0] == batch_size, (
+                f"Time embedding shape {film_coefs.shape[0]} does not match batch size {batch_size}"
+            )
+            film_coefs = film_coefs[batch] # [N, (l+1)^2, d]
+            # Apply FiLM modulation
+            output_embedding.embedding = output_embedding.embedding * ( 1 + film_coefs ) 
+            # assuming that the features only need light modulation, this means that film gammas should be close to 0
+            # and within the activation function range
 
         # Enhanced attention with edge information
         output_embedding = self.ga(
