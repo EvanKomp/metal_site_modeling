@@ -727,6 +727,10 @@ class MetalSiteFeaturizer:
         
         # Convert all metals to <METAL> token (vectorized)
         metal_token_id = element_tokenizer.metal_token_id
+        # set element labels - this method is mutually exclusive to node masking so we should not get in the way
+        if pdata.element_labels is None:
+            pdata.element_labels = pdata.element.clone()
+        # Set all metal elements to <METAL> token   
         pdata.element[metal_mask] = metal_token_id
         
         # Not totally sure exactly what needs to be masked here, I think charge
