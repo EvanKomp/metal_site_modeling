@@ -51,60 +51,339 @@ class EquiformerWEdgesBackbone(nn.Module):
     """
     Enhanced Equiformer backbone with molecular feature support and edge information processing.
     
-    Designed to accept BatchProteinData with:
+    This is the core neural network architecture for molecular/protein modeling that combines SO(3)-equivariant
+    graph neural networks with rich molecular features, topology information, and optional time-dependent
+    modulation via FiLM (Feature-wise Linear Modulation).
+    
+    The model is designed to accept BatchProteinData with:
     - Precomputed molecular graphs with rich atom/bond features
     - Topology information for L1 gradient computation
     - Enhanced edge information processing in attention layers
+    - Optional time-dependent features for diffusion-like models
+    
+    Architecture Overview:
+    1. Node embedding: Maps molecular atom features to SO(3) equivariant representations
+    2. Edge embedding: Incorporates bond features and distance information
+    3. Transformer blocks: SO(3)-equivariant attention with enhanced edge processing
+    4. Topology mixing: Optional gradient-based features for molecular constraints
+    5. FiLM modulation: Optional time-dependent feature modulation
     
     Args:
-        num_layers: Number of transformer layers
-        sphere_channels: Number of spherical channels (one set per resolution)
-        attn_hidden_channels: Number of hidden channels used during SO(2) graph attention
-        num_heads: Number of attention heads
-        attn_alpha_channels: Number of channels for alpha vector in each attention head
-        attn_value_channels: Number of channels for value vector in each attention head
-        ffn_hidden_channels: Number of hidden channels used during feedforward network
-        norm_type: Type of normalization layer (['layer_norm', 'layer_norm_sh', 'rms_norm_sh'])
-        lmax_list: List of degrees (l) for each resolution
-        mmax_list: List of orders (m) for each resolution
-        grid_resolution: Resolution of SO3_grid
-        num_sphere_samples: Number of samples used to approximate the integration of the sphere in the output blocks
-        edge_channels_list: List of sizes of invariant edge embedding
-        use_m_share_rad: Whether all m components within a type-L vector share radial function weights
-        distance_function: Type of distance function (['gaussian', 'gaussian_rbf'])
-        num_distance_basis: Number of distance basis functions
-        attn_activation: Type of activation function for SO(2) graph attention
-        use_s2_act_attn: Whether to use attention after S2 activation
-        use_attn_renorm: Whether to re-normalize attention weights
-        ffn_activation: Type of activation function for feedforward network
-        use_gate_act: If `True`, use gate activation. Otherwise, use S2 activation
-        use_grid_mlp: If `True`, use projecting to grids and performing MLPs for FFN
-        use_sep_s2_act: If `True`, use separable S2 activation when `use_gate_act` is False
-        alpha_drop: Dropout rate for attention weights
-        drop_path_rate: Drop path rate
-        proj_drop: Dropout rate for outputs of attention and FFN
-        weight_init: Weight initialization method
-        max_radius: Used for distance_expansion range
+        # Core Architecture Parameters
+        num_layers (int, default=12):
+            Number of transformer layers in the backbone.
+            	Used by: _init_enhanced_transformer_blocks() to create TransBlockV2WithEdges layers
+            	Higher values increase model capacity but also computational cost
         
-        # Enhanced molecular feature parameters
-        feature_vocab_sizes: Vocabulary sizes for molecular features
-        atom_features: List of atom feature names to use
-        bond_features: List of bond feature names to use
-        embedding_dim: Embedding dimension for molecular features
-        use_topology_gradients: Whether to use topology gradients for L1 features
-        topology_gradient_clip: Gradient clipping value for topology gradients
+        sphere_channels (int, default=128):
+            Number of spherical harmonic channels per resolution.
+            	Used by: All SO3 operations, embeddings, and transformer blocks
+            	Determines the feature dimensionality in spherical harmonic space
+            	Total channels = sphere_channels * num_resolutions
         
-        # Legacy parameters (ignored with warnings)
-        regress_forces: IGNORED - Forces regression handled by separate head modules
-        otf_graph: IGNORED - Uses precomputed graphs from BatchProteinData
-        use_pbc: IGNORED - PBC handled in data preprocessing
-        use_pbc_single: IGNORED - PBC handled in data preprocessing
-        max_neighbors: IGNORED - Applied during graph preprocessing
-        max_num_elements: IGNORED - Use feature_vocab_sizes["element"] instead
-        use_atom_edge_embedding: IGNORED - Replaced by enhanced molecular features
-        share_atom_edge_embedding: IGNORED - Replaced by enhanced molecular features
-        avg_num_nodes: Average number of nodes for normalization
-        avg_degree: Average degree for normalization
+        attn_hidden_channels (int, default=128):
+            Hidden channels for SO(2) graph attention computations.
+            	Used by: TransBlockV2WithEdges attention modules
+            	Controls attention computation capacity independent of main feature channels
+        
+        num_heads (int, default=8):
+            Number of attention heads in multi-head attention.
+            	Used by: TransBlockV2WithEdges attention modules
+            	Must divide evenly into attn_alpha_channels and attn_value_channels
+        
+        attn_alpha_channels (int, default=32):
+            Channels for alpha (query/key) vectors in attention heads.
+            	Used by: SO2EquivariantGraphAttention in TransBlockV2WithEdges
+            	Should be divisible by num_heads for even distribution
+        
+        attn_value_channels (int, default=16):
+            Channels for value vectors in attention heads.
+            	Used by: SO2EquivariantGraphAttention in TransBlockV2WithEdges
+            	Should be divisible by num_heads for even distribution
+        
+        ffn_hidden_channels (int, default=512):
+            Hidden channels in feedforward network layers.
+            	Used by: FeedForwardNetwork in TransBlockV2WithEdges
+            	Controls capacity of position-wise feedforward transformations
+        
+        norm_type (str, default="rms_norm_sh"):
+            Type of normalization layer to use.
+            	Used by: get_normalization_layer() for norm_1 and norm_final
+            	Options: ['layer_norm', 'layer_norm_sh', 'rms_norm_sh']
+            	'rms_norm_sh' is optimized for spherical harmonics
+        
+        # SO(3) Representation Parameters
+        lmax_list (List[int], default=[6]):
+            List of maximum degrees (l) for spherical harmonics per resolution.
+            	Used by: SO3 components, embeddings, attention, all spherical operations
+            	Determines angular resolution: l=0 (scalar), l=1 (vector), l=2 (quadrupole), etc.
+            	Currently only single resolution supported (length must be 1)
+        
+        mmax_list (List[int], default=None):
+            List of maximum orders (m) for spherical harmonics per resolution.
+            	IGNORED: Automatically derived from lmax_list (mmax = lmax for each resolution)
+            	Legacy parameter maintained for compatibility
+        
+        grid_resolution (int, default=None):
+            Resolution for SO3 grid representations.
+            	Used by: SO3_Grid modules for spherical harmonic grid computations
+            	Higher values increase accuracy but computational cost
+            	If None, uses default from SO3_Grid
+        
+        num_sphere_samples (int, default=128):
+            Number of samples for sphere integration approximation.
+            	Used by: Output blocks for integrating over spherical surfaces
+            	Higher values improve integration accuracy
+                IGNORED in this class but stored for use by heads maybe?
+        
+        # Edge and Distance Parameters
+        edge_channels_list (List[int], default=None):
+            List of channel sizes for invariant edge embeddings.
+            	Used by: TransBlockV2WithEdges, EdgeDegreeEmbedding
+            	Default: [num_distance_basis, sphere_channels, sphere_channels]
+            	First element: input channels, subsequent: hidden channels
+        
+        use_m_share_rad (bool, default=False):
+            Whether all m components within a type-L vector share radial function weights.
+            	Used by: RadialFunction in SO3 operations
+            	True: Reduces parameters, False: More expressive radial functions
+        
+        distance_function (str, default="gaussian_rbf"):
+            Type of distance expansion function.
+            	Used by: _init_distance_expansion() to create distance_expansion module
+            	Options: ['gaussian', 'gaussian_rbf']
+            	'gaussian_rbf': GaussianRadialBasisLayer (learnable)
+            	'gaussian': GaussianSmearing (not learnable, fixed basis)
+        
+        num_distance_basis (int, default=128):
+            Number of radial basis functions for distance expansion.
+            	Used by: distance_expansion module, EdgeDegreeEmbedding, TransBlockV2WithEdges
+            	Higher values allow finer distance resolution
+        
+        max_radius (float, default=5.0):
+            Maximum radius for distance expansion.
+            	Used by: distance_expansion module to set basis function range
+            	Probably should be relatively large as it won't increase graph size.
+        
+        # Activation and Regularization Parameters
+        attn_activation (str, default="scaled_silu"):
+            Activation function for attention computations.
+            	Used by: SO2EquivariantGraphAttention in TransBlockV2WithEdges
+            	Controls non-linearity in attention score computation
+        
+        use_s2_act_attn (bool, default=False):
+            Whether to use S2 activation after attention.
+            	Used by: TransBlockV2WithEdges attention modules
+            	Alternative to standard attention activation
+        
+        use_attn_renorm (bool, default=True):
+            Whether to re-normalize attention weights.
+            	Used by: SO2EquivariantGraphAttention in TransBlockV2WithEdges
+            	Helps stabilize attention during training
+        
+        ffn_activation (str, default="scaled_silu"):
+            Activation function for feedforward networks.
+            	Used by: FeedForwardNetwork in TransBlockV2WithEdges
+            	Controls non-linearity in position-wise transformations
+        
+        use_gate_act (bool, default=False):
+            Whether to use gate activation instead of S2 activation.
+            	Used by: TransBlockV2WithEdges for choosing activation type
+            	Gate activation can be more stable but less expressive
+        
+        use_grid_mlp (bool, default=False):
+            Whether to use grid-based MLPs in feedforward networks.
+            	Used by: FeedForwardNetwork in TransBlockV2WithEdges
+            	Projects to grids before applying MLPs for efficiency
+        
+        use_sep_s2_act (bool, default=True):
+            Whether to use separable S2 activation when gate activation is disabled.
+            	Used by: TransBlockV2WithEdges when use_gate_act=False
+            	More efficient S2 activation implementation
+        
+        alpha_drop (float, default=0.0):
+            Dropout rate for attention weights.
+            	Used by: SO2EquivariantGraphAttention in TransBlockV2WithEdges
+            	Helps prevent attention overfitting
+        
+        drop_path_rate (float, default=0.0):
+            Drop path rate for stochastic depth regularization.
+            	Used by: TransBlockV2WithEdges for residual connection dropping
+            	Randomly drops entire residual branches during training
+        
+        proj_drop (float, default=0.0):
+            Dropout rate for attention and feedforward outputs.
+            	Used by: TransBlockV2WithEdges for output projections
+            	Applied after attention and FFN computations
+        
+        weight_init (str, default="uniform"):
+            Weight initialization method.
+            	Used by: eqv2_init_weights() applied to all modules
+            	Options: ['uniform', 'normal']
+        
+        # FiLM Time Modulation Parameters
+        use_time (bool, default=False):
+            Whether to expect time tensors and use FiLM modulation.
+            	Used by: _init_film() and forward() for time-dependent feature modulation
+            	Enables diffusion-like models with time-conditioned generation
+        
+        film_time_embedding_dim (int, default=128):
+            Dimension for time embedding after nonlinear projection.
+            	Used by: SO3EquivariantFiLM for time feature processing
+            	Output dimension of time embedding MLP
+        
+        film_hidden_dim (int, default=256):
+            Hidden dimension for FiLM MLP layers.
+            	Used by: SO3EquivariantFiLM internal MLP computations
+            	Controls capacity of time-to-modulation transformation
+        
+        film_mlp_layers (int, default=2):
+            Number of layers in FiLM MLP.
+            	Used by: SO3EquivariantFiLM for time embedding processing
+            	Deeper MLPs can learn more complex time dependencies
+        
+        film_num_gaussians (int, default=512):
+            Number of Gaussian basis functions for time encoding.
+            	Used by: SO3EquivariantFiLM for time smearing/encoding
+            	More Gaussians provide finer temporal resolution
+        
+        film_basis_function (str, default="gaussian_rbf"):
+            Type of basis function for time embedding.
+            	Used by: SO3EquivariantFiLM for time encoding
+            	Options: ['gaussian_rbf', 'gaussian']
+        
+        # Enhanced Molecular Feature Parameters
+        feature_vocab_sizes (Dict[str, int], default=None):
+            Vocabulary sizes for categorical molecular features.
+            	Used by: NodeEmbedder, EdgeDegreeEmbedding, TransBlockV2WithEdges
+            	Maps feature names to vocabulary sizes for embedding layers
+            	Example: {'element': 119, 'charge': 10, 'bond_order': 5}
+        
+        atom_features (List[str], default=['element', 'charge', 'nhyd', 'hyb']):
+            List of atom feature names to use from BatchProteinData.
+            	Used by: NodeEmbedder for atom embedding, _extract_feature_dict()
+            	Must correspond to attributes in BatchProteinData
+        
+        bond_features (List[str], default=['bond_order', 'is_in_ring', 'is_aromatic']):
+            List of bond feature names to use from BatchProteinData.
+            	Used by: EdgeDegreeEmbedding, TransBlockV2WithEdges for edge embedding
+            	Must correspond to edge attributes in BatchProteinData
+        
+        embedding_dim (int, default=32):
+            Embedding dimension for categorical feature tokens.
+            	Used by: NodeEmbedder, EdgeDegreeEmbedding for categorical embeddings
+            	Size of lookup table embeddings before linear projection
+        
+        edge_degree_projector_hidden_layers (int, default=2):
+            Number of hidden layers in edge degree projector MLP.
+            	Used by: EdgeDegreeEmbedding for processing concatenated edge features
+            	Controls complexity of edge feature integration
+        
+        edge_degree_projector_size (int, default=64):
+            Hidden layer size in edge degree projector MLP.
+            	Used by: EdgeDegreeEmbedding for edge feature projection
+            	Width of hidden layers in edge processing MLP
+        
+        # Topology Gradient Parameters
+        use_topology_gradients (bool, default=True):
+            Whether to use topology gradients for L1 feature enhancement.
+            	Used by: _init_topology_mixing(), _compute_topology_gradients(), forward()
+            	Incorporates molecular constraint gradients into L=1 spherical harmonics
+        
+        topology_gradient_clip (float, default=100.0):
+            Gradient clipping value for topology gradient computation.
+            	Used by: compute_positional_topology_gradients()
+            	Prevents exploding gradients from molecular constraint violations
+        
+        # Legacy Parameters (Maintained for Compatibility)
+        regress_forces (bool, default=True):
+            IGNORED: Forces regression handled by separate head modules.
+            	Legacy parameter from original Equiformer
+            	Warning issued if non-default value provided
+        
+        otf_graph (bool, default=True):
+            IGNORED: Uses precomputed graphs from BatchProteinData.
+            	Legacy parameter for on-the-fly graph construction
+            	This model expects precomputed molecular graphs
+        
+        use_pbc (bool, default=True):
+            IGNORED: Periodic boundary conditions handled in data preprocessing.
+            	Legacy parameter for PBC handling
+            	PBC should be handled during graph construction
+        
+        use_pbc_single (bool, default=False):
+            IGNORED: PBC single processing handled in data preprocessing.
+            	Legacy parameter for single-image PBC
+            	Not used in current implementation
+        
+        max_neighbors (int, default=500):
+            IGNORED: Max neighbors constraint applied during graph preprocessing.
+            	Legacy parameter for neighbor limiting
+            	Should be applied during graph construction phase
+        
+        max_num_elements (int, default=90):
+            IGNORED: Use feature_vocab_sizes["element"] instead.
+            	Legacy parameter for element vocabulary size
+            	Replaced by more flexible feature_vocab_sizes dictionary
+        
+        use_atom_edge_embedding (bool, default=True):
+            IGNORED: Replaced by enhanced molecular feature embedding.
+            	Legacy parameter for atom-edge embedding
+            	Superseded by enhanced NodeEmbedder and EdgeDegreeEmbedding
+        
+        share_atom_edge_embedding (bool, default=False):
+            IGNORED: Replaced by enhanced molecular feature embedding.
+            	Legacy parameter for embedding sharing
+            	Not applicable with new embedding architecture
+        
+        # Normalization Parameters
+        avg_num_nodes (float, default=77.81317):
+            Average number of nodes for normalization (from IS2RE dataset statistics).
+            	Used by: EdgeDegreeEmbedding for rescaling aggregated edge features
+            	Helps stabilize training across different graph sizes
+        
+        avg_degree (float, default=23.395238876342773):
+            Average node degree for normalization (from IS2RE dataset statistics).
+            	Used by: EdgeDegreeEmbedding rescale_factor for edge aggregation
+            	Prevents features from growing with node degree
+    
+    Attributes:
+        # Core Components
+        node_embedder (NodeEmbedder): Embeds atom features to sphere_channels_all
+        so3_scalar_embedder (SO3ScalarEmbedder): Converts to SO3 l=0 embedding
+        edge_deg_embedding (EdgeDegreeEmbedding): Enhanced edge embedding with molecular features
+        blocks (nn.ModuleList): List of TransBlockV2WithEdges transformer layers
+        distance_expansion (Union[GaussianSmearing, GaussianRadialBasisLayer]): Distance basis functions
+        
+        # SO3 Components
+        SO3_rotation (nn.ModuleList): SO3_Rotation modules for Wigner-D matrices
+        mappingReduced (CoefficientMappingModule): l,m coefficient mapping
+        SO3_grid (ModuleListInfo): Grid representations for spherical harmonics
+        
+        # Normalization
+        norm_1 (nn.Module): Input normalization layer
+        norm_final (nn.Module): Output normalization layer
+        
+        # Optional Components
+        topology_mixer (SO3_L1_LinearMixing): Mixes topology gradients into L1 features (if use_topology_gradients)
+        film (SO3EquivariantFiLM): Time-dependent feature modulation (if use_time)
+    
+    Input Requirements:
+        data (BatchProteinData): Must contain:
+            - positions: Atom coordinates [N, 3]
+            - element: Atomic numbers [N]
+            - edge_index: Graph edges [2, E] 
+            - distances: Edge distances [E, 1]
+            - distance_vec: Edge vectors [E, 3]
+            - Molecular features specified in atom_features and bond_features
+            - topology: Dict with bonds, bond_lengths, chirals, planars (if use_topology_gradients)
+            - time: Time values [batch_size] (if use_time)
+            - batch: Batch assignment [N] (if use_time)
+    
+    Returns:
+        dict: Contains:
+            - "node_embedding": SO3_Embedding with final node representations
+            - "graph": GraphInfo object with graph metadata for downstream heads
     """
     
     def __init__(
@@ -124,8 +403,8 @@ class EquiformerWEdgesBackbone(nn.Module):
         num_sphere_samples: int = 128,
         edge_channels_list: Optional[List[int]] = None,
         use_m_share_rad: bool = False,
-        distance_function: str = "gaussian",
-        num_distance_basis: int = 512,
+        distance_function: str = "gaussian_rbf",
+        num_distance_basis: int = 128,
         attn_activation: str = "scaled_silu",
         use_s2_act_attn: bool = False,
         use_attn_renorm: bool = True,
@@ -139,15 +418,18 @@ class EquiformerWEdgesBackbone(nn.Module):
         weight_init: str = "uniform",
         max_radius: float = 5.0,  # Used for distance_expansion range
         use_time: bool = False, # whether to expect time tensors and use FiLM to modulate the model
-        film_time_embedding_dim: int = 128,  # Dimension for time embedding in FiLM
+        film_time_embedding_dim: int = 128,  # Dimension for time embedding in FiLM eg output of nonlinear embedding
         film_hidden_dim: int = 256,  # Hidden dimension for FiLM MLP
-        film_mlp_layers: int = 3,  # Number of layers in FiLM MLP
-        film_num_gaussians: int = 50,  # Number of gaussian basis functions for time smearing
+        film_mlp_layers: int = 2,  # Number of layers in FiLM MLP
+        film_num_gaussians: int = 512,  # Number of gaussian basis functions for time smearing
+        film_basis_function: str = "gaussian_rbf",  # Type of basis function for FiLM time embedding
         # Enhanced molecular feature parameters
         feature_vocab_sizes: Optional[Dict[str, int]] = None,
         atom_features: Optional[List[str]] = None,
         bond_features: Optional[List[str]] = None,
-        embedding_dim: int = 32,
+        edge_degree_projector_hidden_layers: int = 2,
+        edge_degree_projector_size: int = 64,
+        embedding_dim: int = 32, # for tokens to linear embedding
         use_topology_gradients: bool = True,
         topology_gradient_clip: float = 100.0,
         # Legacy parameters (ignored with warnings)
@@ -200,6 +482,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         self.film_hidden_dim = film_hidden_dim
         self.film_mlp_layers = film_mlp_layers
         self.film_num_gaussians = film_num_gaussians
+        self.film_basis_function = film_basis_function
 
         
         # Store enhanced feature parameters
@@ -207,11 +490,15 @@ class EquiformerWEdgesBackbone(nn.Module):
         self.atom_features = atom_features or ['element', 'charge', 'nhyd', 'hyb']
         self.bond_features = bond_features or ['bond_order', 'is_in_ring', 'is_aromatic']
         self.embedding_dim = embedding_dim
+        self.edge_degree_projector_hidden_layers = edge_degree_projector_hidden_layers
+        self.edge_degree_projector_size = edge_degree_projector_size
         self.use_topology_gradients = use_topology_gradients
         self.topology_gradient_clip = topology_gradient_clip
         
         # Computed properties (same as original EquiformerV2)
         self.num_resolutions = len(self.lmax_list)
+        if self.num_resolutions > 1:
+            raise ValueError("EquiformerWEdgesBackbone currently supports only a single resolution (lmax_list must have length 1), really don't know what would happen if you try to use multiple resolutions.")
         self.sphere_channels_all = self.num_resolutions * self.sphere_channels
         self.avg_num_nodes = avg_num_nodes
         self.avg_degree = avg_degree
@@ -363,9 +650,9 @@ class EquiformerWEdgesBackbone(nn.Module):
             node_features=self.atom_features,
             embedding_dim=self.embedding_dim,
             embedding_use_bias=True,
-            projector_hidden_layers=2,
-            projector_size=64,
-            rescale_factor=1.0,
+            projector_hidden_layers=self.edge_degree_projector_hidden_layers,
+            projector_size=self.edge_degree_projector_size,
+            rescale_factor=self.avg_degree,
         )
     
     def _init_normalization_layers(self):
@@ -448,6 +735,7 @@ class EquiformerWEdgesBackbone(nn.Module):
                 hidden_dim=self.film_hidden_dim,
                 mlp_layers=self.film_mlp_layers,
                 num_gaussians=self.film_num_gaussians,
+                basis_function=self.film_basis_function,
                 basis_start=0.0,
                 basis_end=1.0,
             )
@@ -536,7 +824,11 @@ class EquiformerWEdgesBackbone(nn.Module):
             SO3_rot.wigner_inv = SO3_rot.wigner_inv.to(data.positions.dtype).detach()  # Ensure inverse wigner is in correct dtype
         
         # Distance embedding using enhanced radial basis
-        edge_distance_rbf = self.distance_expansion(edge_distance)
+        if self.distance_function == "gaussian":
+            edge_distance_rbf = self.distance_expansion(edge_distance)
+        elif self.distance_function == "gaussian_rbf":
+            # Gaussian Radial Basis Layer returns a tensor directly
+            edge_distance_rbf = self.distance_expansion(edge_distance.squeeze(-1))  # Ensure correct shape for RBF layer
         
         ###############################################################
         # Initialize node embeddings

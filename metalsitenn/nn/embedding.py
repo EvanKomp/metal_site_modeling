@@ -397,7 +397,7 @@ class EdgeDegreeEmbedding(torch.nn.Module):
         use_edge_features: bool=True,
         bond_features: List[str]=['bond_order', 'is_in_ring', 'is_aromatic'],
         use_node_features: bool=True,
-        node_features: List[str]=['atomic_number', 'formal_charge'],
+        node_features: List[str]=['element', 'charge', 'nhyd', 'hyb'],
         embedding_dim: int=128,
         embedding_use_bias: bool=True,
         projector_hidden_layers: int=2,

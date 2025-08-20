@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from typing import List, Union, Optional
 from fairchem.core.models.scn.smearing import GaussianSmearing
+from fairchem.core.models.equiformer_v2.gaussian_rbf import GaussianRadialBasisLayer
 from fairchem.core.models.equiformer_v2.so3 import CoefficientMappingModule
 
 from metalsitenn.nn.mlp import MLP
@@ -42,6 +43,7 @@ class SO3EquivariantFiLM(nn.Module):
         time_embedding_dim: int = 256,
         hidden_dim: int = 256,
         mlp_layers: int = 3,
+        basis_function: str = "gaussian_rbf",  # Type of basis function for time embedding
         num_gaussians: int = 50,
         basis_start: float = 0.0,
         basis_end: float = 1.0,
@@ -63,14 +65,22 @@ class SO3EquivariantFiLM(nn.Module):
         self.num_channels = num_channels
         self.num_layers = num_layers
         self.num_resolutions = len(self.lmax_list)
+        self.basis_function = basis_function
         
         # Gaussian time embedding
-        self.time_embedding = GaussianSmearing(
-            start=basis_start,
-             stop=basis_end, 
-            num_gaussians=num_gaussians,
-            basis_width_scalar=(basis_end - basis_start) / num_gaussians
-        )
+        if basis_function == "gaussian":
+            self.time_embedding = GaussianSmearing(
+                start=basis_start,
+                stop=basis_end, 
+                num_gaussians=num_gaussians,
+                basis_width_scalar=(basis_end - basis_start) / num_gaussians
+            )
+        elif basis_function == "gaussian_rbf":
+            self.time_embedding = GaussianRadialBasisLayer(
+                num_basis=num_gaussians,
+                cutoff=basis_end)
+        else:
+            raise ValueError(f"Unsupported basis function: {basis_function}. Use 'gaussian' or 'gaussian_rbf'.")
         
         # Time encoding MLP
         self.time_mlp = MLP(
@@ -143,7 +153,10 @@ class SO3EquivariantFiLM(nn.Module):
             time = time.unsqueeze(-1)
         
         # a) Gaussian smearing of time
-        time_embedded = self.time_embedding(time)  # (batch_size, num_gaussians)
+        if self.basis_function == "gaussian":
+            time_embedded = self.time_embedding(time)  # (batch_size, num_gaussians)
+        elif self.basis_function == "gaussian_rbf":
+            time_embedded = self.time_embedding(time.squeeze(-1))  # (batch_size, num_gaussians)
         
         # b) Pass through MLP  
         time_features = self.time_mlp(time_embedded)  # (batch_size, hidden_dim)
