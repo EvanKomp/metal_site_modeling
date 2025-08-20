@@ -805,6 +805,20 @@ class EquiformerWEdgesBackbone(nn.Module):
         Returns:
             dict: Dictionary containing node embeddings and graph information
         """
+
+        # check feature sizes against vocab
+        for atom_feature_name in self.atom_features:
+            if atom_feature_name not in self.feature_vocab_sizes:
+                raise ValueError(f"Atom feature '{atom_feature_name}' not found in feature_vocab_sizes")
+            if getattr(data, atom_feature_name) is None or getattr(data, atom_feature_name).max() >= self.feature_vocab_sizes[atom_feature_name]:
+                raise ValueError(f"Atom feature '{atom_feature_name}' exceeds vocabulary size {self.feature_vocab_sizes[atom_feature_name]}")
+            
+        for bond_feature_name in self.bond_features:
+            if bond_feature_name not in self.feature_vocab_sizes:
+                raise ValueError(f"Bond feature '{bond_feature_name}' not found in feature_vocab_sizes")
+            if getattr(data, bond_feature_name) is None or getattr(data, bond_feature_name).max() >= self.feature_vocab_sizes[bond_feature_name]:
+                raise ValueError(f"Bond feature '{bond_feature_name}' exceeds vocabulary size {self.feature_vocab_sizes[bond_feature_name]}")
+
         atomic_numbers = data.element
         num_atoms = len(atomic_numbers)
         
