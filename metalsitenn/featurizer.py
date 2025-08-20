@@ -190,12 +190,9 @@ class MetalSiteFeaturizer:
         )
         edge_index = torch.stack([src, dst], dim=1)  # [E, 2]
 
-        # also extract distances from the 2D distance matrix
-        distances = R[src, dst].unsqueeze(-1)  # [E, 1]
-
         # assign to ProteinData
-        pdata.distances = distances
         pdata.distance_vec = r[dst] - r[src]
+        pdata.distances = torch.norm(pdata.distance_vec, dim=1).unsqueeze(-1)  # [E, 1]
         pdata.edge_index = edge_index
 
         return pdata

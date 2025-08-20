@@ -100,7 +100,7 @@ def compute_positional_topology_gradients(
         # reorder such that the three types of gradients (channels) are the last dim, instead of the vector being there
         g = g.permute(0, 2, 1)
 
-        return g.detach()
+        return g.detach().to(r.dtype).to(r.device)
 
 
 class SO3_L1_Linear(nn.Module):

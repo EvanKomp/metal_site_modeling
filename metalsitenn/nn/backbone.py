@@ -448,8 +448,8 @@ class EquiformerWEdgesBackbone(nn.Module):
                 hidden_dim=self.film_hidden_dim,
                 mlp_layers=self.film_mlp_layers,
                 num_gaussians=self.film_num_gaussians,
-                sigma_min=0.0,
-                sigma_max=1.0,
+                basis_start=0.0,
+                basis_end=1.0,
             )
     
     def _extract_feature_dict(self, data: 'BatchProteinData') -> Dict[str, torch.Tensor]:
@@ -526,11 +526,14 @@ class EquiformerWEdgesBackbone(nn.Module):
         edge_index = data.edge_index
         edge_distance = data.distances
         edge_distance_vec = data.distance_vec
-        edge_rot_mat = init_edge_rot_mat(edge_distance_vec)
+        edge_rot_mat = init_edge_rot_mat(edge_distance_vec).to(data.positions.dtype)
+        
         
         # Set up SO3 rotation matrices
         for i, SO3_rot in enumerate(self.SO3_rotation):
-            SO3_rot.set_wigner(edge_rot_mat)
+            SO3_rot.set_wigner(edge_rot_mat) # NOTE: This forces the SO3_rotation to be in float32 regardless of dtype of data, fix that now
+            SO3_rot.wigner = SO3_rot.wigner.to(data.positions.dtype).detach()  # Ensure wigner is in correct dtype
+            SO3_rot.wigner_inv = SO3_rot.wigner_inv.to(data.positions.dtype).detach()  # Ensure inverse wigner is in correct dtype
         
         # Distance embedding using enhanced radial basis
         edge_distance_rbf = self.distance_expansion(edge_distance)
