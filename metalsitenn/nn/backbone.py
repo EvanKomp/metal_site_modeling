@@ -403,7 +403,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         num_sphere_samples: int = 128,
         edge_channels_list: Optional[List[int]] = None,
         use_m_share_rad: bool = False,
-        distance_function: str = "gaussian_rbf",
+        distance_function: str = "gaussian",
         num_distance_basis: int = 128,
         attn_activation: str = "scaled_silu",
         use_s2_act_attn: bool = False,
@@ -422,7 +422,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         film_hidden_dim: int = 256,  # Hidden dimension for FiLM MLP
         film_mlp_layers: int = 2,  # Number of layers in FiLM MLP
         film_num_gaussians: int = 512,  # Number of gaussian basis functions for time smearing
-        film_basis_function: str = "gaussian_rbf",  # Type of basis function for FiLM time embedding
+        film_basis_function: str = "gaussian",  # Type of basis function for FiLM time embedding
         # Enhanced molecular feature parameters
         feature_vocab_sizes: Optional[Dict[str, int]] = None,
         atom_features: Optional[List[str]] = None,

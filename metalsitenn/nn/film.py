@@ -43,7 +43,7 @@ class SO3EquivariantFiLM(nn.Module):
         time_embedding_dim: int = 256,
         hidden_dim: int = 256,
         mlp_layers: int = 3,
-        basis_function: str = "gaussian_rbf",  # Type of basis function for time embedding
+        basis_function: str = "gaussian",  # Type of basis function for time embedding
         num_gaussians: int = 50,
         basis_start: float = 0.0,
         basis_end: float = 1.0,
