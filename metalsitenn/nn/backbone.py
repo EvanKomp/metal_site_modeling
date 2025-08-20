@@ -271,7 +271,7 @@ class EquiformerWEdgesBackbone(nn.Module):
         
         embedding_dim (int, default=32):
             Embedding dimension for categorical feature tokens.
-            	Used by: NodeEmbedder, EdgeDegreeEmbedding for categorical embeddings
+            	Used by: NodeEmbedder, EdgeEmbedder, EdgeDegreeEmbedding, and SO2EquivariantGraphAttention (througj the node and edge embedders
             	Size of lookup table embeddings before linear projection
         
         edge_degree_projector_hidden_layers (int, default=2):
