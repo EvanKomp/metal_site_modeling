@@ -6,10 +6,12 @@
 * License: MIT
 '''
 from typing import Dict, List, Optional, Union
+from functools import partial
 from transformers.modeling_utils import PreTrainedModel
 import torch
 from torch import nn
 
+from fairchem.core.models.equiformer_v2.weight_initialization import eqv2_init_weights
 
 from .backbone import EquiformerWEdgesBackbone
 from .pretrained_config import EquiformerWEdgesConfig
@@ -49,6 +51,11 @@ class EquiformerWEdgesPretrainedModel(PreTrainedModel):
         This method should be implemented in subclasses if heads are used.
         """
         pass
+
+    def _init_weights(self, module):
+        """Initialize weights for PreTrainedModel framework compatibility."""
+        eqv2_init_weights(module, weight_init=self.config.weight_init)
+
 
 
 class EquiformerWEdgesModel(EquiformerWEdgesPretrainedModel):
