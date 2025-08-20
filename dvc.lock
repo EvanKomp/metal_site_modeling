@@ -251,8 +251,8 @@ stages:
       size: 36783
     - path: metalsitenn/placer_modules/cifutils.py
       hash: md5
-      md5: 9e6ccccf048346044f1a857f492a1948
-      size: 107778
+      md5: 723a8f98829673c969575fe71103f551
+      size: 106626
     - path: pipeline/1/1.1_parse_sites_metadata.py
       hash: md5
       md5: 2d23a4f4bec768fb66986532e945667d
@@ -332,9 +332,9 @@ stages:
     outs:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 82ccf9dff04e8fc87fba9ba75ec5fe9e.dir
-      size: 637191945
-      nfiles: 43197
+      md5: 80202eb7f50557a973ffdedf1466bea9.dir
+      size: 634382819
+      nfiles: 43198
   1.0_construct_edquality_mapper:
     cmd: python pipeline/1/1.0_construct_edquality_mapper.py
     deps:

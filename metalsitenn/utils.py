@@ -314,10 +314,9 @@ def visualize_metal_site_3d(site_data: Dict,
     viewer.zoomTo()
     return viewer
 
-def visualize_featurized_metal_site_3d(
-    atom_features_dict: Dict[str, torch.Tensor],
-    bond_features_dict: Dict[str, torch.Tensor],
-    velocities: torch.Tensor = None,  # New parameter: (N_atoms, 3) velocity vectors
+def visualize_protein_data_3d(
+    protein_data,  # ProteinData object
+    velocities: torch.Tensor = None,  # Optional (N_atoms, 3) velocity vectors
     width: int = 800,
     height: int = 600,
     highlight_metals: bool = True,
@@ -331,6 +330,9 @@ def visualize_featurized_metal_site_3d(
     sphere_radius: float = 0.3,
     highlight_atoms = None,
     highlight_color = 'pink',
+    focus_atom: int = None,  # Atom index to focus on and highlight neighbors
+    focus_color: str = 'magenta',
+    neighbor_color: str = 'cyan',
     # Velocity visualization parameters
     show_velocities: bool = True,
     velocity_scale: float = 1.0,
@@ -339,11 +341,10 @@ def visualize_featurized_metal_site_3d(
     velocity_threshold: float = 0.1,  # Min velocity magnitude to display
 ) -> py3Dmol.view:
     """
-    Visualize a featurized metal binding site in 3D using py3Dmol with optional velocity vectors.
+    Visualize ProteinData in 3D using py3Dmol with optional velocity vectors.
     
     Args:
-        atom_features_dict: Dictionary of atom features from MetalSiteFeaturizer
-        bond_features_dict: Dictionary of bond features from MetalSiteFeaturizer
+        protein_data: ProteinData object containing atom and bond information
         velocities: Optional (N_atoms, 3) tensor of velocity vectors for each atom
         width: Width of the viewer in pixels
         height: Height of the viewer in pixels
@@ -358,6 +359,9 @@ def visualize_featurized_metal_site_3d(
         sphere_radius: Radius for atom spheres
         highlight_atoms: List/set of atom indices to highlight
         highlight_color: Color for highlighted atoms
+        focus_atom: Index of atom to focus on (will be highlighted with X shape)
+        focus_color: Color for the focus atom
+        neighbor_color: Color for atoms connected to focus atom
         show_velocities: Whether to display velocity vectors
         velocity_scale: Scale factor for velocity vector length
         velocity_color: Color for velocity arrows
@@ -368,28 +372,41 @@ def visualize_featurized_metal_site_3d(
         py3Dmol viewer object ready for display
         
     Raises:
-        ValueError: If required features are missing from input dictionaries
+        ValueError: If required features are missing from ProteinData
     """
+    import py3Dmol
+    import numpy as np
+    import torch
+    from metalsitenn.tokenizers import TOKENIZERS
+    from metalsitenn.constants import ALL_METALS
+    
     # Validate required features
-    required_atom_features = ['positions', 'element']
-    missing_features = [f for f in required_atom_features if f not in atom_features_dict]
-    if missing_features:
-        raise ValueError(f"Missing required atom features: {missing_features}")
+    if protein_data.positions is None:
+        raise ValueError("ProteinData must have positions")
+    if protein_data.element is None:
+        raise ValueError("ProteinData must have element")
     
     # Validate velocities if provided
-    if velocities is not None:
-        positions = atom_features_dict['positions']
+    if type(velocities) == str and velocities == 'flow':
+        assert protein_data.position_flow_labels is not None, "ProteinData must have position_flow_labels for flow visualization"
+        assert protein_data.time is not None, "ProteinData must have time for flow visualization"
+        vectors = protein_data.position_flow_labels * (1 - protein_data.time.item())
+        velocities = vectors
+
+    elif velocities is not None:
+        positions = protein_data.positions
         if velocities.shape[0] != positions.shape[0]:
             raise ValueError(f"Velocities shape {velocities.shape} doesn't match positions shape {positions.shape}")
         if velocities.shape[1] != 3:
             raise ValueError(f"Velocities must have shape (N_atoms, 3), got {velocities.shape}")
     
+    
     # Get basic data
-    positions = atom_features_dict['positions']  # (N_atoms, 3)
-    element_tokens = atom_features_dict['element'].squeeze(-1)  # (N_atoms,)
+    positions = protein_data.positions  # (N_atoms, 3)
+    element_tokens = protein_data.element.squeeze(-1)  # (N_atoms,)
     n_atoms = len(positions)
     
-    # Get tokenizers
+    # Get tokenizer
     element_tokenizer = TOKENIZERS['element']
     
     # Decode elements from tokens
@@ -415,6 +432,25 @@ def visualize_featurized_metal_site_3d(
             elements.append('X')
             is_masked.append(True)
     
+    # Check for masked atoms from training data
+    masked_atoms = []
+    # rely on above logic to determine if atoms are masked, thus atoms that were changed due to bert tweaking
+    # get the color the changed to
+    # if protein_data.atom_masked_mask is not None:
+    #     masked_atoms = protein_data.atom_masked_mask.squeeze(-1).bool()
+    
+    # Find neighbors of focus atom if specified
+    focus_neighbors = set()
+    if focus_atom is not None and protein_data.edge_index is not None:
+        edge_indices = protein_data.edge_index  # (E, 2)
+        for edge_idx in range(len(edge_indices)):
+            i, j = edge_indices[edge_idx]
+            i, j = i.item(), j.item()
+            if i == focus_atom:
+                focus_neighbors.add(j)
+            elif j == focus_atom:
+                focus_neighbors.add(i)
+    
     # Create viewer
     viewer = py3Dmol.view(width=width, height=height)
     viewer.setBackgroundColor(background_color)
@@ -423,18 +459,21 @@ def visualize_featurized_metal_site_3d(
     for i in range(n_atoms):
         pos = positions[i].numpy()
         element = elements[i]
-        masked = is_masked[i]
+        masked = is_masked[i] or (len(masked_atoms) > 0 and masked_atoms[i])
         
         # Determine color and size
-        if masked:
-            color = mask_color
-            radius = mask_size
-        elif highlight_metals and (element in ALL_METALS or element == 'Fe'):
-            color = metal_color
-            radius = metal_size
-        elif highlight_atoms is not None and i in highlight_atoms:
+        if highlight_atoms is not None and i in highlight_atoms:
             color = highlight_color
             radius = sphere_radius * 1.5
+        elif masked:
+            color = mask_color
+            radius = mask_size
+        elif i == focus_atom:
+            color = focus_color
+            radius = sphere_radius * 2.0  # Make focus atom larger
+        elif i in focus_neighbors:
+            color = neighbor_color
+            radius = sphere_radius * 1.3
         else:
             # Use CPK colors for common elements
             cpk_colors = {
@@ -454,9 +493,32 @@ def visualize_featurized_metal_site_3d(
             'alpha': 0.8
         })
         
+        # Add X marker for focus atom
+        if i == focus_atom:
+            # Add X shape using two perpendicular cylinders
+            x_size = radius * 1.5
+            # First diagonal of X
+            viewer.addCylinder({
+                'start': {'x': float(pos[0] - x_size), 'y': float(pos[1] - x_size), 'z': float(pos[2])},
+                'end': {'x': float(pos[0] + x_size), 'y': float(pos[1] + x_size), 'z': float(pos[2])},
+                'radius': 0.05,
+                'color': 'white',
+                'alpha': 1.0
+            })
+            # Second diagonal of X
+            viewer.addCylinder({
+                'start': {'x': float(pos[0] - x_size), 'y': float(pos[1] + x_size), 'z': float(pos[2])},
+                'end': {'x': float(pos[0] + x_size), 'y': float(pos[1] - x_size), 'z': float(pos[2])},
+                'radius': 0.05,
+                'color': 'white',
+                'alpha': 1.0
+            })
+        
         # Add labels if requested
         if show_labels:
             label_text = f"{element}{i}" if not masked else f"MASK{i}"
+            if protein_data.atom_name is not None and i < len(protein_data.atom_name):
+                label_text = f"{protein_data.atom_name[i]}"
             viewer.addLabel(label_text, {
                 'position': {'x': float(pos[0]), 'y': float(pos[1]), 'z': float(pos[2])},
                 'backgroundColor': 'white',
@@ -502,55 +564,80 @@ def visualize_featurized_metal_site_3d(
                         'fontSize': 8
                     })
     
-    # Add bonds if bond features are available
-    if 'bond_order' in bond_features_dict:
-        bond_order_matrix = bond_features_dict['bond_order']  # (N_atoms, N_atoms)
+    # # Add bonds from topology (prioritized source)
+    # if protein_data.topology is not None and 'bonds' in protein_data.topology:
+    #     bonds = protein_data.topology['bonds']  # (N_bonds, 2)
+        
+    #     for bond_idx in range(len(bonds)):
+    #         i, j = bonds[bond_idx]
+    #         i, j = i.item(), j.item()
+            
+    #         # Skip if atoms are masked
+    #         if (len(masked_atoms) > 0 and (masked_atoms[i] or masked_atoms[j])):
+    #             continue
+                
+    #         # Add bond as cylinder
+    #         pos_i = positions[i].numpy()
+    #         pos_j = positions[j].numpy()
+            
+    #         viewer.addCylinder({
+    #             'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
+    #             'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
+    #             'radius': stick_radius,
+    #             'color': 'gray',
+    #             'alpha': 0.8
+    #         })
+    
+    # Fallback: Add bonds from edge features if topology unavailable
+    if protein_data.bond_order is not None and protein_data.edge_index is not None:
+        bond_orders = protein_data.bond_order.squeeze(-1)  # (E,)
+        edge_indices = protein_data.edge_index  # (E, 2)
+        
+        # Get bond tokenizer
         bond_tokenizer = TOKENIZERS['bond_order']
         
         # Get non-bonded token ID for comparison
         non_bonded_id = bond_tokenizer.non_bonded_token_id
         mask_token_id = bond_tokenizer.mask_token_id if hasattr(bond_tokenizer, 'mask_token_id') else None
         
-        # Find all bonds (upper triangle to avoid duplicates)
-        for i in range(n_atoms):
-            for j in range(i + 1, n_atoms):
-                bond_token = bond_order_matrix[i, j].item()
+        # Add bonds
+        for edge_idx in range(len(edge_indices)):
+            i, j = edge_indices[edge_idx]
+            bond_token = bond_orders[edge_idx].item()
+            
+            # Skip non-bonds and masked bonds
+            if bond_token == non_bonded_id:
+                continue
+            if mask_token_id is not None and bond_token == mask_token_id:
+                continue
                 
-                # Skip non-bonds and masked bonds
-                if bond_token == non_bonded_id:
-                    continue
-                if mask_token_id is not None and bond_token == mask_token_id:
-                    continue
-                if is_masked[i] or is_masked[j]:
-                    continue
-                    
-                # Decode bond order
-                try:
-                    bond_order = bond_tokenizer.decode(bond_token)
-                except KeyError:
-                    continue
-                    
-                # Determine bond style based on order
-                if bond_order == 1:
-                    bond_radius = stick_radius
-                elif bond_order == 2:
-                    bond_radius = stick_radius * 1.2
-                elif bond_order == 3:
-                    bond_radius = stick_radius * 1.4
-                else:
-                    bond_radius = stick_radius
-                    
-                # Add bond as cylinder
-                pos_i = positions[i].numpy()
-                pos_j = positions[j].numpy()
+            # Decode bond order
+            try:
+                bond_order = bond_tokenizer.decode(bond_token)
+            except KeyError:
+                continue
                 
-                viewer.addCylinder({
-                    'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
-                    'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
-                    'radius': bond_radius,
-                    'color': 'gray',
-                    'alpha': 0.8
-                })
+            # Determine bond style based on order
+            if bond_order == 1:
+                bond_radius = stick_radius
+            elif bond_order == 2:
+                bond_radius = stick_radius * 1.2
+            elif bond_order == 3:
+                bond_radius = stick_radius * 1.4
+            else:
+                bond_radius = stick_radius
+                
+            # Add bond as cylinder
+            pos_i = positions[i].numpy()
+            pos_j = positions[j].numpy()
+            
+            viewer.addCylinder({
+                'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
+                'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
+                'radius': bond_radius,
+                'color': 'gray',
+                'alpha': 0.8
+            })
     
     viewer.zoomTo()
     return viewer
