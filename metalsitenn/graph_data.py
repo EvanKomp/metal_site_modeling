@@ -598,3 +598,30 @@ class BatchProteinData:
     def __repr__(self) -> str:
         """Return string representation of batch."""
         return f"BatchProteinData(batch_size={self.batch_size}, total_atoms={len(self.batch)})"
+    
+
+@dataclass(frozen=True)
+class ModelOutput:
+    """
+    Data class for model output.
+    
+    Attributes:
+        logits: Model output logits (e.g., for classification).
+        loss: Loss value if computed.
+        aux_outputs: Optional auxiliary outputs (e.g., attention weights).
+    """
+    node_embeddings: torch.Tensor = None
+    node_logits: torch.Tensor = None
+    metal_logits: torch.Tensor = None
+    node_vectors: torch.Tensor = None
+
+    loss: torch.Tensor = None
+
+    node_loss: torch.Tensor = None
+    node_losses: torch.Tensor = None
+
+    denoising_loss: torch.Tensor = None
+
+    film_l2_loss: torch.Tensor = None
+
+    metal_id_loss: torch.Tensor = None
