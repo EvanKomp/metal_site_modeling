@@ -4,10 +4,6 @@ data:
   # source: "./tmp/tmp_cifs"
   debug_max_files: null # Maximum number of sites to use for debugging
 
-  # related to tokenization
-  metal_known: false # Use unique tokens for metals vs generic METAL token
-  aggregate_uncommon: true # Aggregate uncommon atom types into a single token
-
   # parsing metal binding sites
   remove_entities: ['SO4', 'PO4', 'CL', 'BR', 'I', 'NO3', 'ACT', 'FMT', 'TRS', 'BIC', 'TRA', 'MES', 'BIS', 'EPE', 'IMD', 'GOL', 'ETG', 'PEG', 'PG4', 'PGE', 'MPD', 'DMS', 'SUC', 'TRE', 'XYL', 'ERY', 'ACE', 'EOH', 'MOH', 'IPA', 'BUT', 'DMF', 'DMSO', 'LDA', 'OP1', 'C8E', 'DDM', 'BOG', 'LMT', 'IOD', 'XE', 'KR', 'BCB', 'BTB', 'CR', 'MB', 'UNX', 'UNL', 'UNK', 'DUM', 'AMS', 'LIS', 'CAS', 'MPO', 'NEP', 'PEN', 'HEX']
   skip_sites_with_entities:  null # list of entitiy names or 'non_metal', in which case if a site contains an antity that does not have a metal, it is skipped (other than water)
@@ -20,63 +16,35 @@ data:
   min_residues_per_site: 3 # Minimum number of residues in a site to consider it valid
   max_water_bfactor: 18
   n_cores: 104
-  max_rczd: 6.0 # Maximum sigma to be considered a properly labeled metal
-  max_res: 3.0 # Maximum resolution for site to be considered
-  
-  test_frac: 0.05 # Fraction of data to use for testing
 
-training:
-  fix_ca: true # may need to be moved - whether or not CA are fixed in diffussion, also controls whether noise is applied to its position.
+2_pretraining:
+  # related to data filtering and processing
+  data:
+    # filtering
+    filtering:
+      valid_metals: null
+      min_metals: null
+      max_metals: null
+      min_organic_ligands: null
+      max_organic_ligands: null
+      min_waters: null
+      max_waters: null
+      min_nucleotides: null
+      max_nucleotides: null
+      min_amino_acids: 4
+      max_amino_acids: null
+      min_co_amino_acids: 2
+      max_co_amino_acids: null
+      min_sites_per_pdb: null
+      max_sites_per_pdb: null
+      max_unresolved_removed: 0
+      max_resolution: 3.5
+      max_max_rczd: null
 
-# model:
-#   model_atom_types: false
-#   l: 2 # Maximum order of irreps to consider within the model
-#   hidden_scale: 128 # base multiplicity for l=0 irreps, eg. Xe0 + Xo0 + ...
-#   hidden_scale_decay: 0.25 # Multiplicative decay factor for each additional l, eg. Xe1 = Xe0 * hidden_scale_decay
-#   fc_neurons: [64, 64] # Number of neurons in each fully connected layer
-#   num_heads: 8 # Number of attention heads within each transformer block
-#   atom_embed_dim: 32 # Dimensionality of atom embeddings each for atoms and atom types
-#   max_radius: 5 # Maximum distance to consider for interactions Angstroms
-#   max_neighbors: 30 # Maximum number of neighbors to consider for each atom
-#   num_basis: 128 # Number of basis functions to use for radial basis functions
-#   num_layers: 18 # Number of transformer layers
-#   alpha_drop: 0.0 # Dropout rate for aattention heads
-#   proj_drop: 0.0 # Dropout rate for projection layers
-#   drop_path_rate: 0.0 # Drop path rate for stochastic depth
-#   label_smoothing_factor: 0.1 # Label smoothing factor for cross entropy loss
-#   imbalance_loss_reweight: true # Reweight loss based on class imbalance
-#   imbalance_loss_temperature: .3 # Temperature parameter for reweighting
+    # tokenization
+    tokenization:
+      atom_features: ['element', 'charge', 'nhyd', 'hyb']
+      bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
+      active_aggregators: ['unknown_metal']
 
-# training:
-#   debug_sample: null # Number of samples to use for debugging
-#   debug_use_toy: true # Use toy dataset for debugging
-#   mask_rate: 0.15 # Fraction of atoms to mask during training
-#   noise_rate: 0.15 # Fraction of coordinates to noise during training
-#   noise_scale: .7 # Standard deviation of noise to apply to coordinates - Units of Angstrom.
 
-#   eval_steps: 50 # Number of steps to evaluate model on validation set (and save a checkpoint)
-#   logging_steps: 5 # Number of steps to log training metrics
-#   load_best_model_at_end: true # Load the best model at the end of training
-
-#   num_epochs: 500 # Number of epochs to train for
-#   per_device_batch_size: 12 # Number of MFS systems per batch
-#   gradient_accumulation_steps: 25 # Number of steps to accumulate gradients over
-#   dataloader_num_workers: 1 # Number of workers to use for data loading
-#   learning_rate: 5e-5 # Learning rate for Adam optimizer
-#   weight_decay: 1e-3 # Weight decay for Adam optimizer
-#   gradient_clipping: 1.0 # Gradient clipping value
-#   frac_noise_loss: 0.5 # Fraction of loss to delegate to noise loss
-#   warmup_pct: .1 # Number of steps to linearly increase learning rate for
-#   use_early_stopping: false # Use early stopping based on validation loss
-#   early_stopping_patience: 5 # Number of steps to wait before stopping training
-#   early_stopping_improvement_fraction: 0.001 # Minimum improvement in validation loss to continue training
-
-# embedding:
-#   how: "all_mean"
-#   hidden_state: -1
-#   hdbscan_min_cluster_size: 5
-#   hdbscan_min_samples: 5
-#   hdbscan_alpha: 1.0
-#   tsne_perplexity: 30
-#   tsne_learning_rate: auto
-#   tsne_n_iter: 1000
