@@ -686,7 +686,7 @@ class MetalSiteFeaturizer:
 
         return pdata
     
-    def _anonymize_metals_for_classification(self, pdata: ProteinData, include_special_tokens: bool = True) -> ProteinData:
+    def _anonymize_metals_for_classification(self, pdata: ProteinData, include_special_tokens: bool = True, active_aggregators: list=None) -> ProteinData:
         """
         Anonymize metals for global classification task by converting all metals to <METAL> token
         and masking associated features. Sets global label vector for metal counts.
@@ -707,8 +707,13 @@ class MetalSiteFeaturizer:
         # Get element tokenizer
         element_tokenizer = self.tokenizers['element']
         
+        # this is used to determine how tokens were aggreated during tokenization
+        # and to determine the metal vocab size.
+        if active_aggregators is None:
+            active_aggregators = []
+
         # Use cached metal token IDs for efficient vectorized detection
-        metal_token_ids = element_tokenizer.metal_token_ids
+        metal_token_ids = torch.tensor(element_tokenizer.get_metal_representing_token_ids(active_aggregators=active_aggregators))
         
         # Find metal atoms using isin (much faster than loop)
         metal_mask = torch.isin(pdata.element, metal_token_ids)
@@ -717,8 +722,8 @@ class MetalSiteFeaturizer:
         metal_tokens = pdata.element[metal_mask]
         
         # Generate metal count labels using ElementTokenizer method
-        metal_counts = element_tokenizer.encode_metal_composition_counts_from_tokens(
-            metal_tokens, include_special_tokens=include_special_tokens
+        metal_counts = element_tokenizer.count_metal_composition_from_tokens(
+            metal_tokens, include_special_tokens=include_special_tokens, active_aggregators=active_aggregators
         )
         
         # Store as global labels

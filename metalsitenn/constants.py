@@ -27,7 +27,7 @@ ALL_METALS = {
     'Rf', 'Db', 'Sg', 'Bh', 'Hs', 'Mt', 'Ds', 'Rg', 'Cn',
     
     # Post-transition metals (poor metals)
-    'Al', 'Ga', 'In', 'Sn', 'Tl', 'Pb', 'Bi', 'Po', 'Nh', 'Fl', 'Mc', 'Lv',
+    'Al', 'Ga', 'In', 'Sn', 'Tl', 'Pb', 'Bi', 'Po', 'Nh', 'Fl', 'Mc', 'Lv', 'Te',
     
     # Lanthanides (f-block, Period 6)
     'La', 'Ce', 'Pr', 'Nd', 'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er', 'Tm', 'Yb', 'Lu',
@@ -48,22 +48,35 @@ BIOLOGICAL_METALS = {
     # Other metals sometimes found in biological contexts
     'Cd', 'Hg', 'Pb', 'V', 'Cr', 'La'
 }
+assert BIOLOGICAL_METALS.issubset(ALL_METALS), "BIOLOGICAL_METALS must be a subset of ALL_METALS"
 
 # Metals commonly found in protein structures (PDB statistics)
 PROTEIN_METALS = {
     'Zn', 'Ca', 'Mg', 'Fe', 'Na', 'K', 'Mn', 'Cu', 'Co', 'Ni', 'Mo', 'Cd', 'Hg'
 }
+assert PROTEIN_METALS.issubset(ALL_METALS), "PROTEIN_METALS must be a subset of ALL_METALS"
 # other critical metals we ar einterested in
 CRITICAL_METALS = {
-    'Li', 'Ni', 'Co', 'Ga', 'Pt', 'Mg', 'Ir', 'Dy', 'Nd', 'Pr', 'Tb', 'Ti', 'U', 'Cu', 'Si', 'Mn', 'Al', 'Te', 'Au', 'Ag'}
+    'Li', 'Ni', 'Co', 'Ga', 'Pt', 'Mg', 'Ir', 'Dy', 'Nd', 'Pr', 'Tb', 'Ti', 'U', 'Cu', 'Mn', 'Al', 'Te', 'Au', 'Ag'}
+assert CRITICAL_METALS.issubset(ALL_METALS), "CRITICAL_METALS must be a subset of ALL_METALS"
 
 RESNAME_3LETTER = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU', 'GLY', 
                       'HIS', 'ILE', 'LEU', 'LYS', 'MET', 'PHE', 'PRO', 'SER', 
                       'THR', 'TRP', 'TYR', 'VAL']
 
 
+# allmetal3d groups
+am3d_ALKAILI_METALS = {'Na', 'K'}
+am3d_MG = {'Mg'}
+am3d_CA = {'Ca'}
+am3d_ZN = {'Zn'}
+am3d_NON_ZN_TM = {'Fe', 'Co', 'Ni', 'Cu', 'Mn'}
+am3d_UNCOVERED_METAL = ALL_METALS - (am3d_ALKAILI_METALS | am3d_MG | am3d_CA | am3d_ZN | am3d_NON_ZN_TM)
+
+
 # Load element mappings from elements.txt
-# used in the CIF parser but these numbers do not necessarilly map to the same
+# used in the CIF parser but these numbers DOI NOT map to the same
+# tokens in the model
 def _load_elements():
     """Load element index to symbol mappings from elements.txt file."""
     DIR = os.path.dirname(__file__)
