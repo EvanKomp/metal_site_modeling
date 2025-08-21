@@ -290,7 +290,7 @@ am3d_AGGREGATOR.update(dict(zip(am3d_MG, ['<am3d_MG>'] * len(am3d_MG))))
 am3d_AGGREGATOR.update(dict(zip(am3d_CA, ['<am3d_CA>'] * len(am3d_CA))))
 am3d_AGGREGATOR.update(dict(zip(am3d_ZN, ['<am3d_ZN>'] * len(am3d_ZN))))
 am3d_AGGREGATOR.update(dict(zip(am3d_NON_ZN_TM, ['<am3d_NON_ZN_TM>'] * len(am3d_NON_ZN_TM))))
-am3d_AGGREGATOR.update(dict(zip(am3d_UNCOVERED_METAL, ['<am3d_METAL>'] * len(am3d_UNCOVERED_METAL))))
+am3d_AGGREGATOR.update(dict(zip(am3d_UNCOVERED_METAL, ['<METAL>'] * len(am3d_UNCOVERED_METAL))))
 
 DEFAULT_AGGREGATORS = {
     'unknown_metal': dict(zip(ALL_METALS, ['<METAL>'] * len(ALL_METALS))),
