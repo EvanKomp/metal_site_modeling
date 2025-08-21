@@ -20,6 +20,7 @@ data:
 2_pretraining:
   # related to data filtering and processing
   data:
+    
     # filtering
     filtering:
       valid_metals: null
@@ -46,5 +47,7 @@ data:
       atom_features: ['element', 'charge', 'nhyd', 'hyb']
       bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
       active_aggregators: ['unknown_metal']
+
+    dataloader_n_processes: 8 # Number of processes to use for data loading
 
 
