@@ -771,7 +771,8 @@ class EquiformerWEdgesBackbone(nn.Module):
             
         # Create atom mask for any masked atoms
         masked_elements = None
-        # TODO: check for masked token
+        if data.atom_masked_mask is not None:
+            masked_elements = data.atom_masked_mask
         
         atom_mask = None if masked_elements is None else ~masked_elements
         

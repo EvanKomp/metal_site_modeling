@@ -95,12 +95,6 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         # FILM LOSS
         film_l2_loss_weight: float = 0.0,
         
-        # === TRAINING PARAMETERS ===
-        # Additional parameters that may be useful during training
-        gradient_clipping: float = 1.0,
-        use_gradient_checkpointing: bool = False,
-        
-        
         **kwargs
     ):
         """
@@ -175,9 +169,6 @@ class EquiformerWEdgesConfig(PretrainedConfig):
             node_class_label_smoothing: Label smoothing factor for node classification.
             film_l2_loss_weight: L2 loss weight for FiLM regularization.
             
-            # === TRAINING PARAMETERS ===
-            gradient_clipping: Global gradient clipping value.
-            use_gradient_checkpointing: Whether to use gradient checkpointing.
         """
         # Set default values for lists and dicts
         if lmax_list is None:
@@ -259,9 +250,6 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         self.node_class_label_smoothing = node_class_label_smoothing
         self.film_l2_loss_weight = film_l2_loss_weight
         
-        # === TRAINING PARAMETERS ===
-        self.gradient_clipping = gradient_clipping
-        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         super().__init__(**kwargs)
     
