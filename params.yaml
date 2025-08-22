@@ -42,10 +42,23 @@ data:
       max_resolution: 3.5
       max_max_rczd: null
 
-    # tokenization
+    # tokenization / collation
     tokenization:
+      # should have 1:1 with MetalSiteCollator
       atom_features: ['element', 'charge', 'nhyd', 'hyb']
       bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
+      k: 20 # graph size
+      node_mlm_do: True
+      node_mlm_rate: 0.15
+      node_mlm_subrate_tweak: 0.0
+      node_mlm_subrate_keep: 0.1
+
+      # this is just here in case we want to train on slightly noised structures
+      # its not expected that we will do full collapsing
+      residue_collapse_do: False
+      residue_collapse_rate: 0.0 # KEEP THIS AT 0.0, otherwise if the above is true, it will collapse whole residues
+      residue_collapse_other_atom_noise_sigma: 0.1 # sigma of gaussian in angstroms to noise all atoms in system
+
       active_aggregators: ['unknown_metal']
 
     dataloader_n_processes: 8 # Number of processes to use for data loading
@@ -54,9 +67,60 @@ data:
       cel_count_to_weight_temperature: 2.0
       cel_count_to_weight_clip_token: '<METAL>' # clip upweighting of any rarer tokens than this by this weight
 
-
   model:
     cel_use_weights: True # Use class weights in cross-entropy loss
 
   training:
+    # should have 1:1 with TrainingConfig
+    max_epochs: 100
+    eval_every: 50
+    log_every: 10
+    max_checkpoints: 5
+    save_best_only: True
+
+    lr_initial: 1e-4
+    scheduler: "LambdaLR"
+    lambda_type: "cosine"
+    warmup_epochs: 0
+    warmup_factor: 0.2
+    lr_min_factor: 0.01
+    decay_epochs: null
+    decay_rate: 0.1
+    
+    # Optimization & Regularization  
+    optimizer: "AdamW"
     batch_size: 32
+    gradient_accumulation_steps: null
+    weight_decay: 0.0
+    clip_grad_norm: 1.0
+    ema_decay: null
+    
+    # Infrastructure
+    amp: False
+    seed: null
+    is_debug: False
+    run_dir: null
+    checkpoint_dir: null
+    ddp: false
+    
+    # Evaluation
+    primary_metric: "val_loss"
+    
+    # Early Stopping
+    patience: null
+    min_delta: 0.0
+    
+    # Training Resumption
+    resume_from_checkpoint: null
+    reset_optimizer: False
+    
+    # Data Loading & Sampling
+    num_workers: 8
+    pin_memory: True
+    drop_last: True
+    shuffle: True
+    
+    # Advanced Training
+    run_val_at_start: True
+
+    
