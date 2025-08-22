@@ -88,7 +88,7 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         task_type: List[str] = ["node_classification"], # one of or multiple of ["node_classification", "metal_classification", "denoise"]
 
         # NODE CLASSIFICATION
-        node_class_loss_function: str = "cross_entropy",
+        node_class_loss_function: str = "CrossEntropyLoss",
         node_class_weights: Optional[List[float]] = None,
         node_class_label_smoothing: float = 0.0,
 
