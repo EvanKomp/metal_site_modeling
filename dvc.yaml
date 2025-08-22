@@ -34,8 +34,9 @@ stages:
     - data/1/1.1_parse_sites_metadata
 
   2.0_get_stats:
-    cmd: python pipeline/2/2.0_get_stats.py
+    cmd: python pipeline/2_pretraining/2.0_get_stats.py
     params:
+    - 2_pretraining.data.debug_max_sites
     - 2_pretraining.data.filtering
     - 2_pretraining.data.tokenization
     - 2_pretraining.data.dataloader_n_processes
@@ -45,3 +46,16 @@ stages:
     - data/2/2.0/element_counts.json
     metrics:
     - data/metrics/2/2.0/data_stats.json
+
+  2.1_compute_node_class_weights:
+    cmd: python pipeline/2_pretraining/2.1_compute_node_class_weights.py
+    params:
+    - 2_pretraining.data.tokenization.active_aggregators
+    - 2_pretraining.data.loss_weighting.cel_count_to_weight_temperature
+    - 2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token
+    deps:
+    - data/2/2.0/element_counts.json
+    outs:
+    - data/2/2.1/node_class_weights.json
+    plots:
+    - data/plots/2/2.1/node_class_weights.png

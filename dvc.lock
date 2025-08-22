@@ -332,9 +332,9 @@ stages:
     outs:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 80202eb7f50557a973ffdedf1466bea9.dir
-      size: 634382819
-      nfiles: 43198
+      md5: 580bf7536778cccd32156a5bca57f386.dir
+      size: 634283309
+      nfiles: 43193
   1.0_construct_edquality_mapper:
     cmd: python pipeline/1/1.0_construct_edquality_mapper.py
     deps:
@@ -350,3 +350,78 @@ stages:
       hash: md5
       md5: 3b5ac7a0fa27ca0f52565b0b575a319c
       size: 50980364
+  2.0_get_stats:
+    cmd: python pipeline/2_pretraining/2.0_get_stats.py
+    deps:
+    - path: data/1/1.1_parse_sites_metadata
+      hash: md5
+      md5: 580bf7536778cccd32156a5bca57f386.dir
+      size: 634283309
+      nfiles: 43193
+    params:
+      params.yaml:
+        2_pretraining.data.dataloader_n_processes: 8
+        2_pretraining.data.debug_max_sites:
+        2_pretraining.data.filtering:
+          valid_metals:
+          min_metals:
+          max_metals:
+          min_organic_ligands:
+          max_organic_ligands:
+          min_waters:
+          max_waters:
+          min_nucleotides:
+          max_nucleotides:
+          min_amino_acids: 4
+          max_amino_acids:
+          min_co_amino_acids: 2
+          max_co_amino_acids:
+          min_sites_per_pdb:
+          max_sites_per_pdb:
+          max_unresolved_removed: 0
+          max_resolution: 3.5
+          max_max_rczd:
+        2_pretraining.data.tokenization:
+          atom_features:
+          - element
+          - charge
+          - nhyd
+          - hyb
+          bond_features:
+          - bond_order
+          - is_in_ring
+          - is_aromatic
+          active_aggregators:
+          - unknown_metal
+    outs:
+    - path: data/2/2.0/element_counts.json
+      hash: md5
+      md5: cb7fc5d0938cb1fa3ced07942cae5d2c
+      size: 454
+    - path: data/metrics/2/2.0/data_stats.json
+      hash: md5
+      md5: 94c1ee66703cd752a356afb7039f1eff
+      size: 1810
+  2.1_compute_node_class_weights:
+    cmd: python pipeline/2_pretraining/2.1_compute_node_class_weights.py
+    deps:
+    - path: data/2/2.0/element_counts.json
+      hash: md5
+      md5: cb7fc5d0938cb1fa3ced07942cae5d2c
+      size: 454
+    params:
+      params.yaml:
+        2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token: 
+          <METAL>
+        2_pretraining.data.loss_weighting.cel_count_to_weight_temperature: 2.0
+        2_pretraining.data.tokenization.active_aggregators:
+        - unknown_metal
+    outs:
+    - path: data/2/2.1/node_class_weights.json
+      hash: md5
+      md5: 6f6b5bf818e74563aa56b2067ac46161
+      size: 1658
+    - path: data/plots/2/2.1/node_class_weights.png
+      hash: md5
+      md5: 943f88ba3dcb697abafb71c60e7fd708
+      size: 416043

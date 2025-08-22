@@ -20,7 +20,7 @@ data:
 2_pretraining:
   # related to data filtering and processing
   data:
-    
+    debug_max_sites: null
     # filtering
     filtering:
       valid_metals: null
@@ -50,4 +50,13 @@ data:
 
     dataloader_n_processes: 8 # Number of processes to use for data loading
 
+    loss_weighting:
+      cel_count_to_weight_temperature: 2.0
+      cel_count_to_weight_clip_token: '<METAL>' # clip upweighting of any rarer tokens than this by this weight
 
+
+  model:
+    cel_use_weights: True # Use class weights in cross-entropy loss
+
+  training:
+    batch_size: 32
