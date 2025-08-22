@@ -130,12 +130,9 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         ema_decay=training_params.ema_decay,
         
         # Infrastructure
-        amp=training_params.amp,
         seed=training_params.seed,
-        is_debug=training_params.is_debug,
         run_dir=training_params.run_dir,
         checkpoint_dir=training_params.checkpoint_dir,
-        ddp=training_params.ddp,
         
         # Evaluation
         primary_metric=training_params.primary_metric,

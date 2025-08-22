@@ -178,16 +178,13 @@ data:
     clip_grad_norm: 1.0
     ema_decay: null
     
-    # Infrastructure
-    amp: False
+    # Reproducibility & Directories
     seed: null
-    is_debug: False
     run_dir: null
     checkpoint_dir: null
-    ddp: false
     
     # Evaluation
-    primary_metric: "val_loss"
+    primary_metric: "loss"
     
     # Early Stopping
     patience: null
