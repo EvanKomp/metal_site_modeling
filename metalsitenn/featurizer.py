@@ -1117,6 +1117,10 @@ class MetalSiteCollator:
             bond_features=bond_features,
             k=k,
             custom_tokenizers_init=custom_tokenizers_init)
+        
+        self.k = k
+        self.atom_features = atom_features
+        self.bond_features = bond_features
         self.node_mlm_do = node_mlm_do
         self.node_mlm_rate = node_mlm_rate
         self.node_mlm_subrate_tweak = node_mlm_subrate_tweak
@@ -1175,3 +1179,32 @@ class MetalSiteCollator:
         setattr(featurized_data, 'pdb_id', pdb_ids)
 
         return featurized_data
+    
+    def __repr__(self):
+        """Return a string representation of the MetalSiteCollator instance."""
+        return (
+            f"MetalSiteCollator(\n"
+            f"    atom_features={self.atom_features},\n"
+            f"    bond_features={self.bond_features},\n"
+            f"    k={self.k},\n"
+            f"    custom_tokenizers_init={getattr(self.featurizer, 'custom_tokenizers_init', None)},\n"
+            f"    node_mlm_do={self.node_mlm_do},\n"
+            f"    node_mlm_rate={self.node_mlm_rate},\n"
+            f"    node_mlm_subrate_tweak={self.node_mlm_subrate_tweak},\n"
+            f"    node_mlm_subrate_keep={self.node_mlm_subrate_keep},\n"
+            f"    metal_classification={self.metal_classification},\n"
+            f"    metal_classification_include_special_tokens={self.metal_classification_include_special_tokens},\n"
+            f"    residue_collapse_do={self.residue_collapse_do},\n"
+            f"    residue_collapse_specific_residues={self.residue_collapse_specific_residues},\n"
+            f"    residue_collapse_rate={self.residue_collapse_rate},\n"
+            f"    residue_collapse_ca_fixed={self.residue_collapse_ca_fixed},\n"
+            f"    residue_collapse_center_atom_noise_sigma={self.residue_collapse_center_atom_noise_sigma},\n"
+            f"    residue_collapse_limb_atom_noise_sigma={self.residue_collapse_limb_atom_noise_sigma},\n"
+            f"    residue_collapse_other_atom_noise_sigma={self.residue_collapse_other_atom_noise_sigma},\n"
+            f"    residue_collapse_time={self.residue_collapse_time!r},\n"
+            f"    movable_atoms={self.movable_atoms!r},\n"
+            f"    active_aggregators={self.active_aggregators},\n"
+            f"    **kwargs={self.kwargs}\n"
+            f")"
+        )
+

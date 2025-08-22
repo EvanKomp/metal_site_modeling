@@ -14,8 +14,6 @@ import numpy as np
 from dataclasses import dataclass
 import torch
 
-from metalsitenn.tokenizers import TOKENIZERS
-from metalsitenn.constants import ALL_METALS
 
 
 @dataclass
@@ -34,9 +32,30 @@ class ParamsObj:
     def __repr__(self):
         return str(self.__dict__)
     
+    def keys(self):
+        return self.__dict__.keys()
+    
+    def values(self):
+        return self.__dict__.values()
+    
     @property
     def param_names(self):
         return list(self.__dict__.keys())
+    
+    def copy(self):
+        """Return a deep copy of the ParamsObj."""
+        import copy
+        return copy.deepcopy(self)
+    
+    def dict(self):
+        """Convert ParamsObj back to a nested dictionary."""
+        result = {}
+        for k, v in self.__dict__.items():
+            if isinstance(v, ParamsObj):
+                result[k] = v.dict()
+            else:
+                result[k] = v
+        return result
     
 
 def make_jsonable(dic):

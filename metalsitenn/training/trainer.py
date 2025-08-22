@@ -103,7 +103,7 @@ class TrainerConfig:
     # Optimization & Regularization  
     optimizer: str = "AdamW"
     batch_size: int = 32
-    gradient_accumulation_steps: int = 1
+    gradient_accumulation_steps: int = None
     weight_decay: float = 0.0
     clip_grad_norm: Optional[float] = None
     ema_decay: Optional[float] = None
@@ -147,8 +147,8 @@ class TrainerConfig:
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         
-        if self.accumulate_grad_batches <= 0:
-            raise ValueError("accumulate_grad_batches must be positive")
+        if self.gradient_accumulation_steps is not None and self.gradient_accumulation_steps <= 0:
+            raise ValueError("gradient_accumulation_steps must be positive")
         
         if self.max_checkpoints <= 0:
             raise ValueError("max_checkpoints must be positive")
@@ -173,3 +173,12 @@ class TrainerConfig:
         known_fields = {field.name for field in cls.__dataclass_fields__.values()}
         filtered_dict = {k: v for k, v in config_dict.items() if k in known_fields}
         return cls(**filtered_dict)
+    
+
+class MetalSiteTrainer:
+    def __init__(self, config: TrainerConfig):
+        self.config = config
+
+    def run(self):
+
+        pass

@@ -147,7 +147,8 @@ class EquiformerWEdgesForPretraining(EquiformerWEdgesModel):
             )
         else:
             self.node_class_weights = None
-        self.cel = nn.CrossEntropyLoss(reduction='none', weight=self.node_class_weights)
+            
+        self.cel = nn.CrossEntropyLoss(reduction='none', weight=self.node_class_weights, label_smoothing=self.config.node_class_label_smoothing)
 
     def compute_loss(self, batch: BatchProteinData, logits: torch.Tensor, film_norm: torch.Tensor) -> torch.Tensor:
         """

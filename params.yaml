@@ -21,7 +21,7 @@ data:
   # related to data filtering and processing
   data:
     debug_max_sites: null
-    # filtering
+    # filtering 1:1 with MetalSiteDataset filtering
     filtering:
       valid_metals: null
       min_metals: null
@@ -41,6 +41,11 @@ data:
       max_unresolved_removed: 0
       max_resolution: 3.5
       max_max_rczd: null
+
+    splitting:
+      test_frac: 0.1
+      val_frac_of_train: 0.05
+      seed: 42
 
     # tokenization / collation
     tokenization:
@@ -128,16 +133,13 @@ data:
     film_num_gaussians: 512
     film_basis_function: "gaussian"
     
-    # === NORMALIZATION STATISTICS ===
-    avg_num_nodes: 100  # num atoms in the system
-    avg_degree: 20      # eg. the graph size
+    # # === NORMALIZATION STATISTICS ===
+    # avg_num_nodes: 100  # num atoms in the system
+    # avg_degree: 20      # eg. the graph size
     
-    # === TASK-SPECIFIC PARAMETERS ===
-    task_type: ["node_classification"]  # one of or multiple of ["node_classification", "metal_classification", "denoise"]
-    
+    # === TASK-SPECIFIC PARAMETERS ===    
     # NODE CLASSIFICATION
-    node_class_loss_function: "CrossEntropyLoss"
-    node_class_weights: null
+    node_class_weights: true # the config class expects tensor, here put true or false to use weights from 2.1 script
     node_class_label_smoothing: 0.0
     
     # FILM LOSS
@@ -147,6 +149,8 @@ data:
     # - get atom and bond features from the tokenizer config
     # - compute feature_vocab_sizes from tokenizer config
     # - if node_class_weights, first extract the values and replace the bool with a tensor.
+    # - get avg_degree from the tokenizer config k
+    # - get avg_num_nodes from the dataset stats
 
 
   training:

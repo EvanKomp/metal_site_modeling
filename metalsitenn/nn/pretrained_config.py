@@ -84,18 +84,13 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         avg_degree: float = 20, # eg. the graph size
         
         # === TASK-SPECIFIC PARAMETERS ===
-        # These are useful for loss computation but not directly used by backbone
-        task_type: List[str] = ["node_classification"], # one of or multiple of ["node_classification", "metal_classification", "denoise"]
 
         # NODE CLASSIFICATION
-        node_class_loss_function: str = "CrossEntropyLoss",
         node_class_weights: Optional[List[float]] = None,
         node_class_label_smoothing: float = 0.0,
 
         # FILM LOSS
         film_l2_loss_weight: float = 0.0,
-        
-        **kwargs
     ):
         """
         Initialize EquiformerWEdgesConfig.
@@ -163,13 +158,12 @@ class EquiformerWEdgesConfig(PretrainedConfig):
             avg_degree: Average node degree for normalization.
             
             # === TASK-SPECIFIC PARAMETERS ===
-            task_type: List of task types (node_classification, metal_classification, denoise).
-            node_class_loss_function: Loss function for node classification.
             node_class_weights: Weights for class balancing in node classification.
             node_class_label_smoothing: Label smoothing factor for node classification.
             film_l2_loss_weight: L2 loss weight for FiLM regularization.
             
         """
+        super().__init__()
         # Set default values for lists and dicts
         if lmax_list is None:
             lmax_list = [3]
@@ -179,8 +173,7 @@ class EquiformerWEdgesConfig(PretrainedConfig):
             atom_features = ['element', 'charge', 'nhyd', 'hyb']
         if bond_features is None:
             bond_features = ['bond_order', 'is_in_ring', 'is_aromatic']
-        if isinstance(task_type, str):
-            task_type = [task_type]
+
         
         # === CORE ARCHITECTURE ===
         self.num_layers = num_layers
@@ -244,14 +237,10 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         self.avg_degree = avg_degree
         
         # === TASK-SPECIFIC PARAMETERS ===
-        self.task_type = task_type
-        self.node_class_loss_function = node_class_loss_function
         self.node_class_weights = node_class_weights
         self.node_class_label_smoothing = node_class_label_smoothing
         self.film_l2_loss_weight = film_l2_loss_weight
         
-        
-        super().__init__(**kwargs)
     
     @property
     def backbone_kwargs(self) -> Dict:
@@ -324,30 +313,6 @@ class EquiformerWEdgesConfig(PretrainedConfig):
             'avg_degree': self.avg_degree,
         }
     
-    @property  
-    def head_kwargs(self) -> Dict:
-        """
-        Get kwargs dictionary for initializing heads based on task types.
-        
-        Returns:
-            Dictionary containing parameters needed by the heads.
-        """
-        head_kwargs = {}
-        
-        # For node classification tasks
-        if "node_classification" in self.task_type:
-            head_kwargs['node_classification'] = {
-                'loss_function': self.node_class_loss_function,
-                'class_weights': self.node_class_weights,
-                'label_smoothing': self.node_class_label_smoothing,
-            }
-            
-        # For FiLM regularization
-        if self.use_time and self.film_l2_loss_weight > 0:
-            head_kwargs['film_l2_loss_weight'] = self.film_l2_loss_weight
-        
-        return head_kwargs
-    
     def validate_config(self) -> None:
         """
         Validate configuration parameters for consistency.
@@ -382,17 +347,6 @@ class EquiformerWEdgesConfig(PretrainedConfig):
                 missing_features.append(feature)
         if missing_features:
             raise ValueError(f"Missing vocabulary sizes for features: {missing_features}")
-            
-        # Validate task-specific parameters
-        valid_tasks = {"node_classification", "metal_classification", "denoise"}
-        invalid_tasks = set(self.task_type) - valid_tasks
-        if invalid_tasks:
-            raise ValueError(f"Invalid task types: {invalid_tasks}. Valid tasks: {valid_tasks}")
-            
-        # Validate node classification parameters
-        if "node_classification" in self.task_type:
-            if self.node_class_loss_function not in ["cross_entropy"]:
-                raise ValueError("node_class_loss_function must be one of: cross_entropy")
                 
         # Validate FiLM parameters
         if self.use_time and self.film_l2_loss_weight < 0:
