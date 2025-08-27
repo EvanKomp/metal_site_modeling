@@ -70,7 +70,7 @@ data:
       cel_count_to_weight_temperature: 2.0
       cel_count_to_weight_clip_token: '<METAL>' # clip upweighting of any rarer tokens than this by this weight
 
-  dataloader_n_processes: 8 # number of processes to use for data loading NOTE: Not used for training this is for getting dataset stats
+    dataloader_n_processes: 8 # number of processes to use for data loading NOTE: Not used for training this is for getting dataset stats
 
   model:
     # should have 1:1 with EquiformerWEdgesConfig

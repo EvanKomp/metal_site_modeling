@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 def setup_logging(log_file: str) -> logging.Logger:
     """Setup logging configuration."""
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
             logging.FileHandler(log_file, mode='w'),

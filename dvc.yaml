@@ -61,7 +61,7 @@ stages:
     - data/plots/2/2.1/node_class_weights.png
 
   2.3_training:
-    cmd: python pipeline/2_pretraining/2.3_training.py
+    cmd: accelerate launch --config_file ${2_pretraining.accelerate_config} pipeline/2_pretraining/2.3_training.py
     params:
     - 2_pretraining.data.debug_max_sites
     - 2_pretraining.data.splitting

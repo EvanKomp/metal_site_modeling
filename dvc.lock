@@ -391,6 +391,14 @@ stages:
           - bond_order
           - is_in_ring
           - is_aromatic
+          k: 20
+          node_mlm_do: true
+          node_mlm_rate: 0.15
+          node_mlm_subrate_tweak: 0.0
+          node_mlm_subrate_keep: 0.1
+          residue_collapse_do: false
+          residue_collapse_rate: 0.0
+          residue_collapse_other_atom_noise_sigma: 0.1
           active_aggregators:
           - unknown_metal
     outs:
@@ -425,3 +433,134 @@ stages:
       hash: md5
       md5: 943f88ba3dcb697abafb71c60e7fd708
       size: 416043
+  2.3_training:
+    cmd: accelerate launch --config_file 
+      accelerate_configs/one_process_full_precision.yaml 
+      pipeline/2_pretraining/2.3_training.py
+    deps:
+    - path: data/1/1.1_parse_sites_metadata
+      hash: md5
+      md5: 580bf7536778cccd32156a5bca57f386.dir
+      size: 634283309
+      nfiles: 43193
+    - path: data/2/2.1/node_class_weights.json
+      hash: md5
+      md5: 6f6b5bf818e74563aa56b2067ac46161
+      size: 1658
+    params:
+      params.yaml:
+        2_pretraining.accelerate_config: 
+          accelerate_configs/one_process_full_precision.yaml
+        2_pretraining.data.debug_max_sites:
+        2_pretraining.data.splitting:
+          test_frac: 0.1
+          val_frac_of_train: 0.05
+          seed: 42
+        2_pretraining.data.tokenization:
+          atom_features:
+          - element
+          - charge
+          - nhyd
+          - hyb
+          bond_features:
+          - bond_order
+          - is_in_ring
+          - is_aromatic
+          k: 20
+          node_mlm_do: true
+          node_mlm_rate: 0.15
+          node_mlm_subrate_tweak: 0.0
+          node_mlm_subrate_keep: 0.1
+          residue_collapse_do: false
+          residue_collapse_rate: 0.0
+          residue_collapse_other_atom_noise_sigma: 0.1
+          active_aggregators:
+          - unknown_metal
+        2_pretraining.model:
+          num_layers: 12
+          sphere_channels: 128
+          attn_hidden_channels: 64
+          num_heads: 8
+          attn_alpha_channels: 64
+          attn_value_channels: 16
+          ffn_hidden_channels: 128
+          norm_type: layer_norm_sh
+          lmax_list:
+          - 3
+          mmax_list:
+          grid_resolution: 18
+          num_distance_basis: 512
+          distance_function: gaussian
+          max_radius: 12.0
+          embedding_dim: 32
+          edge_degree_projector_hidden_layers: 2
+          edge_degree_projector_size: 128
+          edge_channels_list:
+          use_m_share_rad: false
+          attn_activation: silu
+          use_s2_act_attn: false
+          use_attn_renorm: true
+          ffn_activation: silu
+          use_gate_act: false
+          use_grid_mlp: true
+          use_sep_s2_act: true
+          alpha_drop: 0.1
+          drop_path_rate: 0.1
+          proj_drop: 0.0
+          weight_init: uniform
+          use_topology_gradients: true
+          topology_gradient_clip: 100.0
+          use_time: false
+          film_time_embedding_dim: 128
+          film_hidden_dim: 128
+          film_mlp_layers: 2
+          film_num_gaussians: 512
+          film_basis_function: gaussian
+          node_class_weights: true
+          node_class_label_smoothing: 0.0
+          film_l2_loss_weight: 0.0
+        2_pretraining.training:
+          max_epochs: 100
+          eval_every: 50
+          log_every: 10
+          max_checkpoints: 5
+          save_best_only: true
+          lr_initial: 0.0001
+          scheduler: LambdaLR
+          lambda_type: cosine
+          warmup_epochs: 0
+          warmup_factor: 0.2
+          lr_min_factor: 0.01
+          decay_epochs:
+          decay_rate: 0.1
+          optimizer: AdamW
+          batch_size: 32
+          gradient_accumulation_steps: 1
+          weight_decay: 0.0
+          clip_grad_norm: 1.0
+          ema_decay:
+          seed:
+          run_dir: data/2/2.3_pretraining
+          overwrite_output_dir: true
+          primary_metric: val/loss
+          node_level_metrics: false
+          patience:
+          min_delta: 0.0
+          resume_from_checkpoint:
+          reset_optimizer: false
+          num_workers: 8
+          pin_memory: true
+          drop_last: true
+          shuffle: true
+          run_val_at_start: true
+    outs:
+    - path: data/2/2.3_pretraining/checkpoints
+      hash: md5
+      md5: d751713988987e9331980363e24189ce.dir
+      size: 0
+      nfiles: 0
+    - path: data/2/2.3_pretraining/dvclive/plots/metrics
+      hash: md5
+      md5: 5ae88db1ca5db926e6c6d8e1aca53095.dir
+      size: 8499
+      nfiles: 2

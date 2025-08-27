@@ -19,8 +19,6 @@ from typing import Dict, List, Optional, Union, Callable, Any, Tuple
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-from torch.optim import Optimizer
-from torch.optim.lr_scheduler import _LRScheduler
 import logging
 from pathlib import Path
 from accelerate import Accelerator
@@ -371,11 +369,6 @@ class MetalSiteTrainer:
         """
         # self.model.train()
         
-        # Initialize epoch metrics
-        epoch_metrics = {}
-        total_loss = 0.0
-        num_batches = 0
-        
         
         # Progress bar (only on main process)
         if self.accelerator.is_main_process:
@@ -394,7 +387,7 @@ class MetalSiteTrainer:
             _ = self._train_step(batch)
 
 
-            #check for eval, checkpoin, early stop, etc
+            #check for eval, checkpoint, early stop, etc
             # TODO
 
         return None
