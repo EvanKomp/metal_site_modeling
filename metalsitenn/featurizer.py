@@ -76,7 +76,7 @@ class MetalSiteFeaturizer:
             
         self.k = k
 
-    def _process_atom_features(self, chain: Chain, pdata: ProteinData, **kwargs) -> ProteinData:
+    def _process_atom_features(self, chain: Chain, pdata: ProteinData, active_aggregators: List[str]=None, **kwargs) -> ProteinData:
         """Assign atom based features to the ProteinData object."""
 
         # dynamic data structure
@@ -103,7 +103,7 @@ class MetalSiteFeaturizer:
                 tokenizer = self.tokenizers[feature_name]
                 if feature_name == 'element':
                     symbol = I2E.get(atom.element, 'X')
-                    value = tokenizer.encode(symbol, **kwargs)
+                    value = tokenizer.encode(symbol, active_aggregators=active_aggregators, **kwargs)
                 elif feature_name == 'charge':
                     value = tokenizer.encode(atom.charge, **kwargs)
                 elif feature_name == 'nhyd':
@@ -424,7 +424,7 @@ class MetalSiteFeaturizer:
         setattr(pdata, 'topology', result)
         return pdata
     
-    def _init_atoms_into_protein_data(self, chain: Chain, **kwargs) -> ProteinData:
+    def _init_atoms_into_protein_data(self, chain: Chain, active_aggregators: List[str]=None, **kwargs) -> ProteinData:
         """Tokenize a single Chain object into a ProteinData object with just atom features.
         Bond features will need to wait until any noising occurs to avoid graph leakage.
 
@@ -441,7 +441,7 @@ class MetalSiteFeaturizer:
         pdata = ProteinData()
         
         # Assign atom features
-        chain, pdata = self._process_atom_features(chain, pdata, **kwargs)
+        chain, pdata = self._process_atom_features(chain, pdata, active_aggregators=active_aggregators)
         
         return pdata
     
@@ -686,7 +686,7 @@ class MetalSiteFeaturizer:
 
         return pdata
     
-    def _anonymize_metals_for_classification(self, pdata: ProteinData, include_special_tokens: bool = True) -> ProteinData:
+    def _anonymize_metals_for_classification(self, pdata: ProteinData, include_special_tokens: bool = True, active_aggregators: list=None) -> ProteinData:
         """
         Anonymize metals for global classification task by converting all metals to <METAL> token
         and masking associated features. Sets global label vector for metal counts.
@@ -707,8 +707,13 @@ class MetalSiteFeaturizer:
         # Get element tokenizer
         element_tokenizer = self.tokenizers['element']
         
+        # this is used to determine how tokens were aggreated during tokenization
+        # and to determine the metal vocab size.
+        if active_aggregators is None:
+            active_aggregators = []
+
         # Use cached metal token IDs for efficient vectorized detection
-        metal_token_ids = element_tokenizer.metal_token_ids
+        metal_token_ids = torch.tensor(element_tokenizer.get_metal_representing_token_ids(active_aggregators=active_aggregators))
         
         # Find metal atoms using isin (much faster than loop)
         metal_mask = torch.isin(pdata.element, metal_token_ids)
@@ -717,8 +722,8 @@ class MetalSiteFeaturizer:
         metal_tokens = pdata.element[metal_mask]
         
         # Generate metal count labels using ElementTokenizer method
-        metal_counts = element_tokenizer.encode_metal_composition_counts_from_tokens(
-            metal_tokens, include_special_tokens=include_special_tokens
+        metal_counts = element_tokenizer.count_metal_composition_from_tokens(
+            metal_tokens, include_special_tokens=include_special_tokens, active_aggregators=active_aggregators
         )
         
         # Store as global labels
@@ -727,6 +732,10 @@ class MetalSiteFeaturizer:
         
         # Convert all metals to <METAL> token (vectorized)
         metal_token_id = element_tokenizer.metal_token_id
+        # set element labels - this method is mutually exclusive to node masking so we should not get in the way
+        if pdata.element_labels is None:
+            pdata.element_labels = pdata.element.clone()
+        # Set all metal elements to <METAL> token   
         pdata.element[metal_mask] = metal_token_id
         
         # Not totally sure exactly what needs to be masked here, I think charge
@@ -782,6 +791,7 @@ class MetalSiteFeaturizer:
         # custom behavior eg. mutating
         mutations: Tuple[int, str] = None,  # (resid, new_resname) to mutate a residue
         return_batched: bool=True,
+        active_aggregators: List[str] = None,
         **kwargs
     ):
         """
@@ -859,7 +869,7 @@ class MetalSiteFeaturizer:
                 # INITIALIZE PROTEIN DATA OBJECT FROM CHAIN
                 ########################################
                 # we don't yet have graph structure, just atom features and initial positions
-                features = self._init_atoms_into_protein_data(item, **kwargs)
+                features = self._init_atoms_into_protein_data(item, active_aggregators=active_aggregators, **kwargs)
                 # we should be able to conduct noising and collapsing with the current information (eg. no graph)
 
                 ########################################
@@ -1010,7 +1020,8 @@ class MetalSiteFeaturizer:
             if metal_classification:
                 features = self._anonymize_metals_for_classification(
                     features,
-                    include_special_tokens=metal_classification_include_special_tokens
+                    include_special_tokens=metal_classification_include_special_tokens,
+                    active_aggregators=active_aggregators
                 )
             # Append the featurized ProteinData object to the list
             featurized_data.append(features)
@@ -1070,6 +1081,7 @@ class MetalSiteCollator:
             residue_collapse_other_atom_noise_sigma: float = None,
             residue_collapse_time: Union[float, 'random', None] = None,  # 'random' or a float value
             movable_atoms: str = 'noised', # 'none', 'all', 'noised', 'noised_and_side_chains'
+            active_aggregators: List[str]=None,
             **kwargs
     ):
         """
@@ -1098,12 +1110,17 @@ class MetalSiteCollator:
                 - 'all': All atoms are movable
                 - 'noised': Only noised atoms are movable
                 - 'noised_and_side_chains': Any side chain atom is movable in addition to noised atoms
+            active_aggregators: List of active aggregators for tokenization
         """
         self.featurizer = MetalSiteFeaturizer(
             atom_features=atom_features,
             bond_features=bond_features,
             k=k,
             custom_tokenizers_init=custom_tokenizers_init)
+        
+        self.k = k
+        self.atom_features = atom_features
+        self.bond_features = bond_features
         self.node_mlm_do = node_mlm_do
         self.node_mlm_rate = node_mlm_rate
         self.node_mlm_subrate_tweak = node_mlm_subrate_tweak
@@ -1119,6 +1136,7 @@ class MetalSiteCollator:
         self.residue_collapse_other_atom_noise_sigma = residue_collapse_other_atom_noise_sigma
         self.residue_collapse_time = residue_collapse_time
         self.movable_atoms = movable_atoms
+        self.active_aggregators=active_aggregators
         self.kwargs = kwargs
 
     def __call__(self, batch: List[Tuple[int, 'Chain']]) -> BatchProteinData:
@@ -1152,6 +1170,7 @@ class MetalSiteCollator:
             residue_collapse_other_atom_noise_sigma=self.residue_collapse_other_atom_noise_sigma,
             residue_collapse_time=self.residue_collapse_time,
             movable_atoms=self.movable_atoms,
+            active_aggregators=self.active_aggregators,
             **self.kwargs
         )
 
@@ -1160,3 +1179,32 @@ class MetalSiteCollator:
         setattr(featurized_data, 'pdb_id', pdb_ids)
 
         return featurized_data
+    
+    def __repr__(self):
+        """Return a string representation of the MetalSiteCollator instance."""
+        return (
+            f"MetalSiteCollator(\n"
+            f"    atom_features={self.atom_features},\n"
+            f"    bond_features={self.bond_features},\n"
+            f"    k={self.k},\n"
+            f"    custom_tokenizers_init={getattr(self.featurizer, 'custom_tokenizers_init', None)},\n"
+            f"    node_mlm_do={self.node_mlm_do},\n"
+            f"    node_mlm_rate={self.node_mlm_rate},\n"
+            f"    node_mlm_subrate_tweak={self.node_mlm_subrate_tweak},\n"
+            f"    node_mlm_subrate_keep={self.node_mlm_subrate_keep},\n"
+            f"    metal_classification={self.metal_classification},\n"
+            f"    metal_classification_include_special_tokens={self.metal_classification_include_special_tokens},\n"
+            f"    residue_collapse_do={self.residue_collapse_do},\n"
+            f"    residue_collapse_specific_residues={self.residue_collapse_specific_residues},\n"
+            f"    residue_collapse_rate={self.residue_collapse_rate},\n"
+            f"    residue_collapse_ca_fixed={self.residue_collapse_ca_fixed},\n"
+            f"    residue_collapse_center_atom_noise_sigma={self.residue_collapse_center_atom_noise_sigma},\n"
+            f"    residue_collapse_limb_atom_noise_sigma={self.residue_collapse_limb_atom_noise_sigma},\n"
+            f"    residue_collapse_other_atom_noise_sigma={self.residue_collapse_other_atom_noise_sigma},\n"
+            f"    residue_collapse_time={self.residue_collapse_time!r},\n"
+            f"    movable_atoms={self.movable_atoms!r},\n"
+            f"    active_aggregators={self.active_aggregators},\n"
+            f"    **kwargs={self.kwargs}\n"
+            f")"
+        )
+

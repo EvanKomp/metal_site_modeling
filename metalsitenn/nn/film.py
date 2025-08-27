@@ -73,7 +73,7 @@ class SO3EquivariantFiLM(nn.Module):
                 start=basis_start,
                 stop=basis_end, 
                 num_gaussians=num_gaussians,
-                basis_width_scalar=(basis_end - basis_start) / num_gaussians
+                basis_width_scalar=1.0
             )
         elif basis_function == "gaussian_rbf":
             self.time_embedding = GaussianRadialBasisLayer(

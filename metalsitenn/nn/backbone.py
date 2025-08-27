@@ -608,7 +608,7 @@ class EquiformerWEdgesBackbone(nn.Module):
                 start=0.0,
                 stop=self.max_radius,
                 num_gaussians=self.num_distance_basis,
-                basis_width_scalar=(self.max_radius - 0.0) / self.num_distance_basis
+                basis_width_scalar=2.0
             )
         elif self.distance_function == "gaussian_rbf":
             self.distance_expansion = GaussianRadialBasisLayer(
@@ -711,6 +711,7 @@ class EquiformerWEdgesBackbone(nn.Module):
                 alpha_drop=self.alpha_drop,
                 drop_path_rate=self.drop_path_rate,
                 proj_drop=self.proj_drop,
+                use_time=self.use_time,
             )
             self.blocks.append(block)
     
@@ -730,7 +731,7 @@ class EquiformerWEdgesBackbone(nn.Module):
                 lmax_list=self.lmax_list,
                 mmax_list=self.lmax_list,
                 num_channels=self.sphere_channels_all,
-                num_layers=self.num_layers + 1,  # +1 for input embeddings before first layer
+                num_layers=self.num_layers,
                 time_embedding_dim=self.film_time_embedding_dim,
                 hidden_dim=self.film_hidden_dim,
                 mlp_layers=self.film_mlp_layers,
@@ -770,7 +771,8 @@ class EquiformerWEdgesBackbone(nn.Module):
             
         # Create atom mask for any masked atoms
         masked_elements = None
-        # TODO: check for masked token
+        if data.atom_masked_mask is not None:
+            masked_elements = data.atom_masked_mask
         
         atom_mask = None if masked_elements is None else ~masked_elements
         
@@ -804,6 +806,20 @@ class EquiformerWEdgesBackbone(nn.Module):
         Returns:
             dict: Dictionary containing node embeddings and graph information
         """
+
+        # check feature sizes against vocab
+        for atom_feature_name in self.atom_features:
+            if atom_feature_name not in self.feature_vocab_sizes:
+                raise ValueError(f"Atom feature '{atom_feature_name}' not found in feature_vocab_sizes")
+            if getattr(data, atom_feature_name) is None or getattr(data, atom_feature_name).max() >= self.feature_vocab_sizes[atom_feature_name]:
+                raise ValueError(f"Atom feature '{atom_feature_name}' exceeds vocabulary size {self.feature_vocab_sizes[atom_feature_name]}")
+            
+        for bond_feature_name in self.bond_features:
+            if bond_feature_name not in self.feature_vocab_sizes:
+                raise ValueError(f"Bond feature '{bond_feature_name}' not found in feature_vocab_sizes")
+            if getattr(data, bond_feature_name) is None or getattr(data, bond_feature_name).max() >= self.feature_vocab_sizes[bond_feature_name]:
+                raise ValueError(f"Bond feature '{bond_feature_name}' exceeds vocabulary size {self.feature_vocab_sizes[bond_feature_name]}")
+
         atomic_numbers = data.element
         num_atoms = len(atomic_numbers)
         
@@ -882,41 +898,33 @@ class EquiformerWEdgesBackbone(nn.Module):
             assert data.time is not None, "Time tensor must be provided for FiLM modulation"
             assert data.batch is not None, "Batch tensor must be provided for FiLM modulation"
             # Get FiLM modulation coefficients per spherical harmonic per layer
-            time_coefficient_weights = self.film(data.time) # [N layers + 1, batch_size, (lmax + 1)^2, d]
-
-            # Apply FiLM modulation to input
-            coef_weights = time_coefficient_weights[0]  # First layer coefficients [batch_size, (lmax + 1)^2, d]
-            # expand from batch size to num atoms respecting which atom is from which graph
-            batch_indicators = data.batch # [N atoms, indicator up to B]
-            assert batch_indicators.size() == (num_atoms,)
-            batch_size = batch_indicators.max().item() + 1
-            coef_weights = coef_weights[batch_indicators]  # [N atoms, (lmax + 1)^2, d], eg. gamma
-
-            # Apply FiLM modulation to node embeddings
-            node_embedding.embedding = coef_weights * node_embedding.embedding
+            time_coefficient_weights = self.film(data.time) # [N layers, batch_size, (lmax + 1)^2, d]
+            
+            # compute the norms for FiLM coefficients and expose them in case we want to apply l2 norm to the loss
+            film_norm = torch.mean(
+                time_coefficient_weights ** 2
+            )
+        else:
+            film_norm = None
 
         ###############################################################
         # Transformer blocks with enhanced edge information
         ###############################################################
         
         for i in range(self.num_layers):
+            film_coefs = None
+            if self.use_time:
+                # Get FiLM coefficients for this layer
+                film_coefs = time_coefficient_weights[i]
             node_embedding = self.blocks[i](
                 x=node_embedding,
                 edge_distance=edge_distance_rbf,
                 edge_index=edge_index,
                 feature_dict=feature_dict,
+                film_coefs=film_coefs,
                 batch=data.batch if hasattr(data, 'batch') else None,
                 node_offset=0,
             )
-
-            # time modulation
-            if self.use_time:
-                # Get FiLM modulation coefficients for this layer
-                coef_weights = time_coefficient_weights[i + 1]  # i+1 because first layer is input embedding
-                # expand from batch size to num atoms respecting which atom is from which graph
-                coef_weights = coef_weights[batch_indicators]  # [N atoms, (lmax + 1)^2, d], eg. gamma
-                # Apply FiLM modulation to node embeddings
-                node_embedding.embedding = coef_weights * node_embedding.embedding
         
         # Final output normalization
         node_embedding.embedding = self.norm_final(node_embedding.embedding)
@@ -936,5 +944,6 @@ class EquiformerWEdgesBackbone(nn.Module):
         
         return {
             "node_embedding": node_embedding,
+            "film_norm": film_norm,
             "graph": graph_info,
         }
