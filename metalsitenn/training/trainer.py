@@ -627,7 +627,10 @@ class MetalSiteTrainer:
         epoch information, and integrates with accelerator's logging utilities for
         consistent distributed behavior.
         """
-        logger.warning(f"`_log_metrics` dry run called on metrics: {metrics} with prefix: {prefix}")    
+        self.accelerator.log({f"{prefix}{k}": v for k, v in metrics.items()}, step=self.global_step)
+        if self.accelerator.is_main_process:
+            log_msg = f"Step {self.global_step}: " + ", ".join([f"{prefix}{k}={v:.4f}" for k, v in metrics.items()])
+            logger.info(log_msg)
     
     def _cleanup(self) -> None:
         """

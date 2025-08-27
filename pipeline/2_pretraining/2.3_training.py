@@ -133,7 +133,7 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         # Infrastructure
         seed=training_params.seed,
         run_dir=training_params.run_dir,
-        checkpoint_dir=training_params.checkpoint_dir,
+        overwrite_output_dir=training_params.overwrite_output_dir,
         
         # Evaluation
         primary_metric=training_params.primary_metric,
