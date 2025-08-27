@@ -145,7 +145,7 @@ class MetalSiteTrainer:
         training_config: TrainerConfig,
         collator: MetalSiteCollator,
         train_dataset: Dataset,
-        val_dataset: Dataset,
+        val_dataset: Optional[Dataset] = None,
         test_dataset: Optional[Dataset] = None,
         eval_fn: Optional[Callable[[BatchProteinData, ModelOutput], ModelOutput]] = None
     ) -> None:
@@ -180,8 +180,8 @@ class MetalSiteTrainer:
         self.eval_fn = eval_fn if eval_fn is not None else lambda batch, output: output
 
         # initialize training objects
+        self._setup_accelerator() # first so that we can get is_main_process
         self._setup_output_dirs()
-        self._setup_accelerator()
         self._setup_model()
         self._setup_data_loaders()
         self._setup_optimizer_and_scheduler()
@@ -192,17 +192,20 @@ class MetalSiteTrainer:
         """
         Create output directory, making sure to check for existence first.
         """
-        if os.path.exists(self.training_config.run_dir):
-            if self.training_config.overwrite_output_dir:
-                logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
-                shutil.rmtree(self.training_config.run_dir)
-            else:
-                raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
-                                      "Set overwrite_output_dir=True to overwrite.")
-        os.makedirs(self.training_config.run_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
-        os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
-        logger.info(f"Created output directory at {self.training_config.run_dir}")
+        if self.accelerator.is_main_process:
+            if os.path.exists(self.training_config.run_dir):
+                if self.training_config.overwrite_output_dir:
+                    logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
+                    shutil.rmtree(self.training_config.run_dir)
+                else:
+                    raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
+                                        "Set overwrite_output_dir=True to overwrite.")
+            os.makedirs(self.training_config.run_dir, exist_ok=True)
+            os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
+            os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
+            logger.info(f"Created output directory at {self.training_config.run_dir}")
+        
+        self.accelerator.wait_for_everyone()
 
     def _setup_accelerator(self) -> None:
         """
@@ -227,6 +230,8 @@ class MetalSiteTrainer:
                 "save_dvc_exp": False,
                 "dvcyaml": None
             }})
+        
+        self.accelerator.wait_for_everyone()
 
 
     def _setup_model(self) -> None:
@@ -242,7 +247,8 @@ class MetalSiteTrainer:
         assert issubclass(self.model_class, EquiformerWEdgesModel), "model_class must be EquiformerWEdgesModel or subclass"
         self.model = None
         self.ema_object = None
-        logger.warning("`_setup_model` dry run called.")
+        if self.accelerator.is_main_process:
+            logger.warning("`_setup_model` dry run called.")
     
     def _setup_data_loaders(self) -> None:
         """
@@ -265,15 +271,18 @@ class MetalSiteTrainer:
         )
         
         # Create validation data loader
-        self.val_loader = DataLoader(
-            self.val_dataset,
-            batch_size=self.training_config.batch_size,
-            shuffle=False,  # Never shuffle validation
-            num_workers=self.training_config.num_workers,
-            pin_memory=self.training_config.pin_memory,
-            drop_last=False,  # Keep all validation data
-            collate_fn=self.collator
-        )
+        if self.val_dataset is not None:
+            self.val_loader = DataLoader(
+                self.val_dataset,
+                batch_size=self.training_config.batch_size,
+                shuffle=False,  # Never shuffle validation
+                num_workers=self.training_config.num_workers,
+                pin_memory=self.training_config.pin_memory,
+                drop_last=False,  # Keep all validation data
+                collate_fn=self.collator
+            )
+        else:
+            self.val_loader = None
         
         # Create test data loader if test dataset provided
         if self.test_dataset is not None:
@@ -288,12 +297,30 @@ class MetalSiteTrainer:
             )
         else:
             self.test_loader = None
+
+        if self.accelerator.is_main_process:
+            logger.info(f"Created data loaders: train={len(self.train_loader)} total batches, "
+                    f"val={len(self.val_loader)} total batches" + 
+                    (f", test={len(self.test_loader)} total batches" if self.test_loader else ""))
         
-        logger.info(f"Created data loaders: train={len(self.train_loader)} batches, "
-                   f"val={len(self.val_loader)} batches" + 
-                   (f", test={len(self.test_loader)} batches" if self.test_loader else ""))
-        
-        # Note: accelerator.prepare() will be called later in setup to handle distributed sampling
+        # send the datasets to their respective devices
+        self.train_loader = self.accelerator.prepare(self.train_loader)
+        if self.val_dataset is not None:
+            self.val_loader = self.accelerator.prepare(self.val_loader)
+        if self.test_dataset is not None:
+            self.test_loader = self.accelerator.prepare(self.test_loader)
+
+        # log new length
+        if self.accelerator.is_main_process:
+            num_steps = len(self.train_loader)
+            effective_step_size = self.training_config.batch_size * self.accelerator.num_processes
+            logger.info(f"On device training loader={num_steps} total steps of size {effective_step_size}")
+
+            # also log gradient accumulation related stats, maybe this should go in a different method
+            effective_batch_size = effective_step_size * (self.training_config.gradient_accumulation_steps or 1)
+            logger.info(f"Effective batch size per step (all devices + accumulation) = {effective_batch_size}")
+
+        self.accelerator.wait_for_everyone()
         
     
     def _setup_optimizer_and_scheduler(self) -> None:
@@ -307,7 +334,8 @@ class MetalSiteTrainer:
         """
         self.optimizer = None
         self.scheduler = None
-        logger.warning("`_setup_optimizer_and_scheduler` dry run called.")
+        if self.accelerator.is_main_process:
+            logger.warning("`_setup_optimizer_and_scheduler` dry run called.")
     
     def _setup_logging_and_checkpointing(self) -> None:
         """
@@ -325,7 +353,8 @@ class MetalSiteTrainer:
         self.best_step = None
         self.evals_no_improve = 0
         self._metrics_cache = {}
-        logger.warning("`_setup_logging_and_checkpointing` dry run called.")
+        if self.accelerator.is_main_process:
+            logger.warning("`_setup_logging_and_checkpointing` dry run called.")
     
     def _load_checkpoint_if_resuming(self) -> None:
         """
@@ -336,7 +365,8 @@ class MetalSiteTrainer:
         automatically, optionally resets optimizer state if reset_optimizer is True, and
         restores training metadata for continuing from correct epoch/step.
         """
-        logger.warning("`_load_checkpoint_if_resuming` dry run called.")
+        if self.accelerator.is_main_process:
+            logger.warning("`_load_checkpoint_if_resuming` dry run called.")
     
     def run(self) -> None:
         """
@@ -391,39 +421,6 @@ class MetalSiteTrainer:
             # TODO
 
         return None
-
-    def _track_metrics(self, metrics: Dict[str, torch.Tensor], final: bool=False) -> None:
-        """
-        Helps average training metrics since we will not log every step
-
-        Args:
-            metrics: Dictionary containing training 
-            final: Whether this is the final call and we want to get averages and reset the tracker
-        """
-        for key, value in metrics.items():
-            if key not in self._metrics_cache:
-                self._metrics_cache[key] = []
-            # Keep as tensors until final averaging
-            self._metrics_cache[key].append(value)  # No .tolist()
-
-        if final:
-            avg_metrics = {}
-            for key in self._metrics_cache.keys():
-                if self.training_config.node_level_metrics and key != 'num_nodes':
-                    # Concatenate all batches, weight by num_nodes
-                    all_values = torch.cat(self._metrics_cache[key])
-                    all_nodes = torch.cat(self._metrics_cache['num_nodes'])
-                    weighted_sum = (all_values * all_nodes).sum()
-                    total_nodes = all_nodes.sum()
-                    avg_metrics[key] = (weighted_sum / total_nodes).item()
-                else:
-                    all_values = torch.cat(self._metrics_cache[key])
-                    avg_metrics[key] = all_values.mean().item()
-
-            self._metrics_cache = {}
-            return avg_metrics
-        return None
-        
     
     def _train_step(
         self, 
@@ -448,7 +445,7 @@ class MetalSiteTrainer:
 
         with self.accelerator.accumulate(self.model):
             outs = ModelOutput(
-                loss=torch.tensor(0.0)
+                loss=torch.tensor(0.0, device=self.accelerator.device)
             )
 
             # update training related classes
@@ -464,28 +461,72 @@ class MetalSiteTrainer:
 
 
         # log train metrics
-        # not not a logging step, add them to a cache
+        # if not a logging step, add them to a cache
         # if logging step average since last log and actually do the logging
         # gather metrics across processes using accelerator.gather_for_metrics()
         # if node level values attempt to do a weighted average by num nodes
         train_metrics = {}
         for name, value in asdict(outs).items():
             if (name.endswith("loss") or name == "loss") and value is not None:
-                value = value.detach().cpu().unsqueeze(0)  # Always make [1] tensor
+                value = value.detach().unsqueeze(0)  # Always make [1] tensor
                 train_metrics[f"{name}"] = self.accelerator.gather_for_metrics(value)
 
         train_metrics['num_nodes'] = self.accelerator.gather_for_metrics(
-            torch.tensor([n_nodes], dtype=torch.float)
+            torch.tensor([n_nodes], dtype=torch.float, device=self.accelerator.device)
         )
 
         if self.global_step % self.training_config.log_every == 0:
-            agg_train_metrics = self._track_metrics(train_metrics, final=True)
+            agg_train_metrics = self._track_per_step_metrics(train_metrics, final=True)
+            # pop num_nodes since it is really not a useful quantity to log
+            agg_train_metrics.pop('num_nodes', None)
             self._log_metrics(agg_train_metrics, prefix="train/")
         else:
-            _ = self._track_metrics(train_metrics, final=False)
+            _ = self._track_per_step_metrics(train_metrics, final=False)
 
+        # let's not get ahead of ourselves
+        self.accelerator.wait_for_everyone()
         return None
+    
+    def _track_per_step_metrics(self, metrics: Dict[str, torch.Tensor], final: bool=False) -> None:
+        """
+        Helps average training metrics since we will not log every step
 
+        Args:
+            metrics: Dictionary containing training 
+            final: Whether this is the final call and we want to get averages and reset the tracker
+        """
+        for key, value in metrics.items():
+            if key not in self._metrics_cache:
+                self._metrics_cache[key] = []
+            # Keep as tensors until final averaging
+            self._metrics_cache[key].append(value)  # No .tolist()
+
+        if final:
+            # checking that gether creates the correct shape on multiple devices
+            if self.accelerator.is_main_process:
+                logger.debug(f"Gathered train metrics at step {self.global_step}: {self._metrics_cache}") 
+
+            avg_metrics = {}
+            for key in self._metrics_cache.keys():
+                if self.training_config.node_level_metrics and key != 'num_nodes':
+                    # Concatenate all batches, weight by num_nodes
+                    all_values = torch.cat(self._metrics_cache[key])
+                    all_nodes = torch.cat(self._metrics_cache['num_nodes'])
+                    weighted_sum = (all_values * all_nodes).sum()
+                    total_nodes = all_nodes.sum()
+                    avg_metrics[key] = (weighted_sum / total_nodes).item()
+                else:
+                    all_values = torch.cat(self._metrics_cache[key])
+                    
+                    # checking that gether creates the correct shape on multiple devices
+                    if self.accelerator.is_main_process:
+                        logger.debug(f"Averaging {key} over tensor shape {all_values.shape}")
+
+                    avg_metrics[key] = all_values.mean().item()
+
+            self._metrics_cache = {}
+            return avg_metrics
+        return None
     
     def _validate(self) -> Dict[str, float]:
         """
@@ -499,7 +540,8 @@ class MetalSiteTrainer:
         applies custom eval_fn if provided, uses accelerator.gather() to collect results from
         all processes in distributed setting, and returns aggregated validation metrics..
         """
-        logger.warning("`_validate` dry run called.")
+        if self.accelerator.is_main_process:
+            logger.warning("`_validate` dry run called.")
         return {'loss': 0.0}
     
     def _evaluate_batch(

@@ -20,7 +20,7 @@ data:
 2_pretraining:
   # related to data filtering and processing
   data:
-    debug_max_sites: null
+    debug_max_sites: 5000
     # filtering 1:1 with MetalSiteDataset filtering
     filtering:
       valid_metals: null
