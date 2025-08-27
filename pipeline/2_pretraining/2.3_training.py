@@ -20,6 +20,7 @@ from metalsitenn.dataloading import MetalSiteDataset
 from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.nn.pretrained_config import EquiformerWEdgesConfig
 from metalsitenn.training.trainer import TrainerConfig, MetalSiteTrainer
+from metalsitenn.nn.model import EquiformerWEdgesForPretraining
 
 logger = logging.getLogger(__name__)
 
@@ -248,6 +249,7 @@ def main():
     logger.info("Initializing MetalSiteTrainer...")
     trainer = MetalSiteTrainer(
         model_config=model_config,
+        model_class=EquiformerWEdgesForPretraining,
         training_config=training_config,
         collator=collator,
         train_dataset=train_dataset,

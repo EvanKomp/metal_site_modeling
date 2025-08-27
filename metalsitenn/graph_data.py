@@ -604,11 +604,6 @@ class BatchProteinData:
 class ModelOutput:
     """
     Data class for model output.
-    
-    Attributes:
-        logits: Model output logits (e.g., for classification).
-        loss: Loss value if computed.
-        aux_outputs: Optional auxiliary outputs (e.g., attention weights).
     """
     node_embeddings: torch.Tensor = None
     node_logits: torch.Tensor = None

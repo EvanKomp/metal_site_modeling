@@ -173,18 +173,20 @@ data:
     # Optimization & Regularization  
     optimizer: "AdamW"
     batch_size: 32
-    gradient_accumulation_steps: null
+    gradient_accumulation_steps: 1
     weight_decay: 0.0
     clip_grad_norm: 1.0
     ema_decay: null
     
     # Reproducibility & Directories
     seed: null
-    run_dir: null
-    checkpoint_dir: null
+    run_dir: data/2/2.3_pretraining
+    overwrite_output_dir: true
+
     
     # Evaluation
-    primary_metric: "loss"
+    primary_metric: "val/loss"
+    node_level_metrics: False
     
     # Early Stopping
     patience: null

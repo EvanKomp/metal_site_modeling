@@ -12,8 +12,9 @@ This module provides a comprehensive configuration class for training neural net
 particularly for molecular/protein modeling tasks. The configuration is designed to be
 task-agnostic while providing all necessary hyperparameters for training control.
 """
-
-from dataclasses import dataclass, field
+import os
+import shutil
+from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union, Callable, Any, Tuple
 import torch
 import torch.nn as nn
@@ -24,10 +25,15 @@ import logging
 from pathlib import Path
 from accelerate import Accelerator
 
+from tqdm import tqdm
+
 from metalsitenn.nn.pretrained_config import EquiformerWEdgesConfig
-from metalsitenn.nn.model import ModelOutput
+from metalsitenn.nn.model import ModelOutput, EquiformerWEdgesModel
 from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.graph_data import BatchProteinData
+
+import logging
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -66,6 +72,7 @@ class TrainerConfig:
     
     # === EVALUATION ===
     primary_metric: str = "val_loss"  # Metric for model selection
+    node_level_metrics: bool = False
     
     # === EARLY STOPPING ===
     patience: Optional[int] = None  # None = no early stopping
@@ -87,7 +94,7 @@ class TrainerConfig:
     
     # === PATHS ===
     run_dir: Optional[str] = None
-    checkpoint_dir: Optional[str] = None
+    overwrite_output_dir: bool = False
     
     def __post_init__(self):
         """Validate configuration parameters."""
@@ -136,6 +143,7 @@ class MetalSiteTrainer:
     def __init__(
         self,
         model_config: EquiformerWEdgesConfig,
+        model_class: nn.Module,
         training_config: TrainerConfig,
         collator: MetalSiteCollator,
         train_dataset: Dataset,
@@ -163,8 +171,41 @@ class MetalSiteTrainer:
         checkpointing, prepares all components with accelerator.prepare(), and loads from
         checkpoint if resuming training is specified.
         """
-        pass
+        # attribute assignments
+        self.model_config = model_config
+        self.model_class = model_class
+        self.training_config = training_config
+        self.collator = collator
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
+        self.eval_fn = eval_fn if eval_fn is not None else lambda batch, output: output
+
+        # initialize training objects
+        self._setup_output_dirs()
+        self._setup_accelerator()
+        self._setup_model()
+        self._setup_data_loaders()
+        self._setup_optimizer_and_scheduler()
+        self._setup_logging_and_checkpointing()
+        self._load_checkpoint_if_resuming()
     
+    def _setup_output_dirs(self) -> None:
+        """
+        Create output directory, making sure to check for existence first.
+        """
+        if os.path.exists(self.training_config.run_dir):
+            if self.training_config.overwrite_output_dir:
+                logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
+                shutil.rmtree(self.training_config.run_dir)
+            else:
+                raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
+                                      "Set overwrite_output_dir=True to overwrite.")
+        os.makedirs(self.training_config.run_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
+        logger.info(f"Created output directory at {self.training_config.run_dir}")
+
     def _setup_accelerator(self) -> None:
         """
         Initialize Accelerate infrastructure.
@@ -177,8 +218,19 @@ class MetalSiteTrainer:
         to configure the DVC callback to the accelerator here so that when we log metrics
         etc. it goes to dvc
         """
-        pass
-    
+        self.accelerator = Accelerator(
+            gradient_accumulation_steps=self.training_config.gradient_accumulation_steps,
+            log_with='dvclive')
+        self.accelerator.init_trackers(
+            project_name="metal_site_trainer",
+            init_kwargs={"dvclive": {
+                "dir": self.training_config.run_dir + "/dvclive",
+                "report": 'md',
+                "save_dvc_exp": False,
+                "dvcyaml": None
+            }})
+
+
     def _setup_model(self) -> None:
         """
         Initialize and prepare the neural network model.
@@ -189,7 +241,10 @@ class MetalSiteTrainer:
         device placement and distributed training wrapping automatically. Note that the EMA from fairchem
         looks like it is expected to be given POST parallelized model, so call accelerate first
         """
-        pass
+        assert issubclass(self.model_class, EquiformerWEdgesModel), "model_class must be EquiformerWEdgesModel or subclass"
+        self.model = None
+        self.ema_object = None
+        logger.warning("`_setup_model` dry run called.")
     
     def _setup_data_loaders(self) -> None:
         """
@@ -200,7 +255,48 @@ class MetalSiteTrainer:
         training_config, and prepares data loaders with accelerator.prepare() which sets up
         distributed samplers and handles data loading optimizations automatically.
         """
-        pass
+        # Create training data loader
+        self.train_loader = DataLoader(
+            self.train_dataset,
+            batch_size=self.training_config.batch_size,
+            shuffle=self.training_config.shuffle,
+            num_workers=self.training_config.num_workers,
+            pin_memory=self.training_config.pin_memory,
+            drop_last=self.training_config.drop_last,
+            collate_fn=self.collator
+        )
+        
+        # Create validation data loader
+        self.val_loader = DataLoader(
+            self.val_dataset,
+            batch_size=self.training_config.batch_size,
+            shuffle=False,  # Never shuffle validation
+            num_workers=self.training_config.num_workers,
+            pin_memory=self.training_config.pin_memory,
+            drop_last=False,  # Keep all validation data
+            collate_fn=self.collator
+        )
+        
+        # Create test data loader if test dataset provided
+        if self.test_dataset is not None:
+            self.test_loader = DataLoader(
+                self.test_dataset,
+                batch_size=self.training_config.batch_size,
+                shuffle=False,
+                num_workers=self.training_config.num_workers,
+                pin_memory=self.training_config.pin_memory,
+                drop_last=False,
+                collate_fn=self.collator
+            )
+        else:
+            self.test_loader = None
+        
+        logger.info(f"Created data loaders: train={len(self.train_loader)} batches, "
+                   f"val={len(self.val_loader)} batches" + 
+                   (f", test={len(self.test_loader)} batches" if self.test_loader else ""))
+        
+        # Note: accelerator.prepare() will be called later in setup to handle distributed sampling
+        
     
     def _setup_optimizer_and_scheduler(self) -> None:
         """
@@ -211,7 +307,9 @@ class MetalSiteTrainer:
         warmup schedule if specified, and prepares both with accelerator.prepare() which
         handles optimizer state distribution and synchronization in distributed settings.
         """
-        pass
+        self.optimizer = None
+        self.scheduler = None
+        logger.warning("`_setup_optimizer_and_scheduler` dry run called.")
     
     def _setup_logging_and_checkpointing(self) -> None:
         """
@@ -224,7 +322,12 @@ class MetalSiteTrainer:
 
         Most of the logging setup MAY BE HANDLED BY DVC CALLBACK IN ACCELERATE. Not sure.
         """
-        pass
+        self.global_step = 0
+        self.best_metric = None
+        self.best_step = None
+        self.evals_no_improve = 0
+        self._metrics_cache = {}
+        logger.warning("`_setup_logging_and_checkpointing` dry run called.")
     
     def _load_checkpoint_if_resuming(self) -> None:
         """
@@ -235,7 +338,7 @@ class MetalSiteTrainer:
         automatically, optionally resets optimizer state if reset_optimizer is True, and
         restores training metadata for continuing from correct epoch/step.
         """
-        pass
+        logger.warning("`_load_checkpoint_if_resuming` dry run called.")
     
     def run(self) -> None:
         """
@@ -247,7 +350,8 @@ class MetalSiteTrainer:
         Handles distributed training, mixed precision, and gradient accumulation transparently
         through accelerator methods.
         """
-        pass
+        # TODO
+        self._train_epoch(1)
     
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         """
@@ -265,47 +369,145 @@ class MetalSiteTrainer:
         to gradient_accumulation_steps, performs optimizer steps, updates scheduler, and logs
         metrics using accelerator's distributed-aware utilities.
         """
-        pass
+        # self.model.train()
+        
+        # Initialize epoch metrics
+        epoch_metrics = {}
+        total_loss = 0.0
+        num_batches = 0
+        
+        
+        # Progress bar (only on main process)
+        if self.accelerator.is_main_process:
+            pbar = tqdm(
+                enumerate(self.train_loader),
+                total=len(self.train_loader),
+                desc=f"Epoch {epoch}",
+                disable=False
+            )
+        else:
+            pbar = enumerate(self.train_loader)
+        
+        for batch_idx, batch in pbar:
+
+            # take step
+            _ = self._train_step(batch)
+
+
+            #check for eval, checkpoin, early stop, etc
+            # TODO
+
+        return None
+
+    def _track_metrics(self, metrics: Dict[str, torch.Tensor], final: bool=False) -> None:
+        """
+        Helps average training metrics since we will not log every step
+
+        Args:
+            metrics: Dictionary containing training 
+            final: Whether this is the final call and we want to get averages and reset the tracker
+        """
+        for key, value in metrics.items():
+            if key not in self._metrics_cache:
+                self._metrics_cache[key] = []
+            # Keep as tensors until final averaging
+            self._metrics_cache[key].append(value)  # No .tolist()
+
+        if final:
+            avg_metrics = {}
+            for key in self._metrics_cache.keys():
+                if self.training_config.node_level_metrics and key != 'num_nodes':
+                    # Concatenate all batches, weight by num_nodes
+                    all_values = torch.cat(self._metrics_cache[key])
+                    all_nodes = torch.cat(self._metrics_cache['num_nodes'])
+                    weighted_sum = (all_values * all_nodes).sum()
+                    total_nodes = all_nodes.sum()
+                    avg_metrics[key] = (weighted_sum / total_nodes).item()
+                else:
+                    all_values = torch.cat(self._metrics_cache[key])
+                    avg_metrics[key] = all_values.mean().item()
+
+            self._metrics_cache = {}
+            return avg_metrics
+        return None
+        
     
     def _train_step(
         self, 
         batch: BatchProteinData, 
-        step: int
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
         Execute one training step using Accelerate utilities.
         
         Args:
             batch: Batch of molecular data (already moved to correct device by accelerator)
-            step: Current step number
-            
-        Returns:
-            Tuple of (loss_tensor, metrics_dict)
             
         Performs forward pass through model with automatic device placement and mixed precision,
         extracts loss from ModelOutput, uses accelerator.backward() for gradient computation
-        which handles scaling and distributed synchronization, updates EMA if enabled, and
-        returns loss and metrics with proper device handling.
+        which handles scaling and distributed synchronization, updates EMA if enabled.
         """
-        pass
+        n_nodes = len(batch.element)
+
+        # take a step in this class
+        self.global_step += 1
+        # take dvc live step
+        # TODO
+
+        with self.accelerator.accumulate(self.model):
+            outs = ModelOutput(
+                loss=torch.tensor(0.0)
+            )
+
+            # update training related classes
+            # check outs for correct format
+            assert outs.loss is not None, "ModelOutput must contain loss for training step"
+            loss = outs.loss.item()
+            # self.accelerator.backward(outs.loss)
+            # self.optimizer.step()
+            # self.scheduler.step()
+            # self.optimizer.zero_grad()
+
+        # TODO EMA update if needed
+
+
+        # log train metrics
+        # not not a logging step, add them to a cache
+        # if logging step average since last log and actually do the logging
+        # gather metrics across processes using accelerator.gather_for_metrics()
+        # if node level values attempt to do a weighted average by num nodes
+        train_metrics = {}
+        for name, value in asdict(outs).items():
+            if (name.endswith("loss") or name == "loss") and value is not None:
+                value = value.detach().cpu().unsqueeze(0)  # Always make [1] tensor
+                train_metrics[f"{name}"] = self.accelerator.gather_for_metrics(value)
+
+        train_metrics['num_nodes'] = self.accelerator.gather_for_metrics(
+            torch.tensor([n_nodes], dtype=torch.float)
+        )
+
+        if self.global_step % self.training_config.log_every == 0:
+            agg_train_metrics = self._track_metrics(train_metrics, final=True)
+            self._log_metrics(agg_train_metrics, prefix="train/")
+        else:
+            _ = self._track_metrics(train_metrics, final=False)
+
+        return None
+
     
-    def _validate(self, epoch: int, step: int) -> Dict[str, float]:
+    def _validate(self) -> Dict[str, float]:
         """
         Run validation using Accelerate for distributed coordination.
         
-        Args:
-            epoch: Current epoch number
-            step: Current step number
-            
         Returns:
             Dictionary containing validation metrics
             
         Sets model to evaluation mode, iterates through validation DataLoader with automatic
         device handling, performs forward passes with accelerator's automatic mixed precision,
         applies custom eval_fn if provided, uses accelerator.gather() to collect results from
-        all processes in distributed setting, and returns aggregated validation metrics.
+        all processes in distributed setting, and returns aggregated validation metrics..
         """
-        pass
+        logger.warning("`_validate` dry run called.")
+        return {'loss': 0.0}
     
     def _evaluate_batch(
         self, 
@@ -325,7 +527,7 @@ class MetalSiteTrainer:
         unchanged), handles any additional metric computation specified by eval_fn, and returns
         ModelOutput with computed metrics ready for aggregation across processes.
         """
-        pass
+        raise NotImplementedError("Batch evaluation not implemented yet.")
     
     def _aggregate_metrics(
         self, 
@@ -345,12 +547,11 @@ class MetalSiteTrainer:
         automatically through accelerator utilities, and returns final metrics that represent
         performance across entire distributed system. Only main process receives final results.
         """
-        pass
+        raise NotImplementedError("Metric aggregation not implemented yet.")
     
     def _should_checkpoint(
         self, 
         val_metrics: Dict[str, float], 
-        epoch: int
     ) -> bool:
         """
         Determine checkpointing using distributed-aware comparison.
@@ -367,13 +568,11 @@ class MetalSiteTrainer:
         across all processes in distributed setting, and returns checkpoint decision that
         is synchronized across all ranks.
         """
-        pass
+        raise NotImplementedError("Checkpoint decision not implemented yet.")
     
     def _save_checkpoint(
         self, 
         val_metrics: Dict[str, float], 
-        epoch: int, 
-        step: int,
         is_best: bool = False
     ) -> None:
         """
@@ -381,8 +580,6 @@ class MetalSiteTrainer:
         
         Args:
             val_metrics: Current validation metrics
-            epoch: Current epoch number
-            step: Current step number
             is_best: Whether this is the best model so far
             
         Uses accelerator.save_state() to save model, optimizer, scheduler, and RNG states
@@ -390,7 +587,7 @@ class MetalSiteTrainer:
         checkpoint rotation according to max_checkpoints, saves additional best checkpoint
         if is_best is True, and includes metadata for resuming training.
         """
-        pass
+        raise NotImplementedError("Checkpoint saving not implemented yet.")
     
     def _should_early_stop(
         self, 
@@ -410,29 +607,27 @@ class MetalSiteTrainer:
         improvement, ensures early stopping decision is consistent across all processes
         in distributed setting, and returns synchronized early stopping signal.
         """
-        pass
+        raise NotImplementedError("Early stopping decision not implemented yet.")
     
     def _log_metrics(
         self, 
         metrics: Dict[str, float], 
-        step: int, 
         prefix: str = ""
     ) -> None:
         """
         Log metrics using Accelerate's distributed-aware logging.
         
         Args:
-            metrics: Dictionary of metrics to log
-            step: Current step number
+            metrics: Dictionary of metrics to logr
             prefix: Prefix for metric names (e.g., "train/", "val/")
             DVC callback should place them in appropriate folders.
             
         Uses accelerator.is_main_process to ensure only main process logs to avoid duplication,
         formats metrics for readable output, writes to configured logging handlers, includes
-        step/epoch information, and integrates with accelerator's logging utilities for
+        epoch information, and integrates with accelerator's logging utilities for
         consistent distributed behavior.
         """
-        pass
+        logger.warning(f"`_log_metrics` dry run called on metrics: {metrics} with prefix: {prefix}")    
     
     def _cleanup(self) -> None:
         """
@@ -442,4 +637,4 @@ class MetalSiteTrainer:
         resources, closes logging handlers, performs final checkpoint save if needed,
         and handles graceful shutdown of all infrastructure managed by accelerator.
         """
-        pass
+        logger.warning("`_cleanup` dry run called.")
