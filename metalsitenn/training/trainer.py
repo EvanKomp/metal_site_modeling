@@ -13,6 +13,7 @@ particularly for molecular/protein modeling tasks. The configuration is designed
 task-agnostic while providing all necessary hyperparameters for training control.
 """
 import os
+import functools
 import shutil
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Union, Callable, Any, Tuple
@@ -132,6 +133,57 @@ class TrainerConfig:
         filtered_dict = {k: v for k, v in config_dict.items() if k in known_fields}
         return cls(**filtered_dict)
 
+######################################################################
+# HELPER FOR AVOIDING DUPLICATE WORK ACROSS PROCESSES
+######################################################################
+
+def main_process_only(func: Callable) -> Callable:
+    """Decorator that only executes the method on the main process."""
+    
+    @functools.wraps(func)
+    def wrapper(self, *args, **kwargs):
+        if hasattr(self, 'accelerator') and self.accelerator.is_main_process:
+            return func(self, *args, **kwargs)
+        return None
+    return wrapper
+
+######################################################################
+# Used of user does not provide to convert metric results from all batches in
+# the eval set to a final output dict and log statements.
+# Note, custom behavior must call trainer._log_metrics if it wants DVC to be tracking its eval quantities.
+######################################################################
+
+def _default_eval_log_fn(trainer, metrics: Dict[str, torch.Tensor]):
+    """
+    Default evaluation logging function that averages metrics.
+    
+    Args:
+        trainer: The trainer instance
+        metrics: Dictionary of metric_name -> tensor from evaluation
+        
+    Returns:
+        None
+    """
+    agg_metrics = {}
+    for key, list_of_tensors in metrics.items():
+        # Concatenate all tensors along first dimension
+        all_values = torch.cat(list_of_tensors)
+        if len(all_values) != (len(trainer.val_loader)*trainer.accelerator.num_processes):
+            if trainer.accelerator.is_main_process:
+                logger.warning(f"Eval metric {key} does not have the length equal to the total number of eval batches, but is going to be meaned anyway. It may not have a signficant meaning.")
+                
+        mean_value = all_values.float().mean().item()
+        agg_metrics[key] = mean_value
+
+    # do the logging
+    trainer._log_metrics(agg_metrics, prefix="eval/")
+
+    # also return metrics so that the upper processes have access to it
+    return agg_metrics
+
+######################################################################
+# Main entry to training API
+######################################################################
 
 class MetalSiteTrainer:
     """
@@ -147,7 +199,8 @@ class MetalSiteTrainer:
         train_dataset: Dataset,
         val_dataset: Optional[Dataset] = None,
         test_dataset: Optional[Dataset] = None,
-        eval_fn: Optional[Callable[[BatchProteinData, ModelOutput], ModelOutput]] = None
+        custom_eval_fn: Optional[Callable[[BatchProteinData, ModelOutput], Dict]] = None,
+        custom_eval_log_fn: Optional[Callable[["MetalSiteTrainer", Dict[str, torch.Tensor]], Dict[str, float]]] = None,
     ) -> None:
         """
         Initialize the MetalSiteTrainer with Accelerate infrastructure.
@@ -159,8 +212,13 @@ class MetalSiteTrainer:
             train_dataset: Training dataset
             val_dataset: Validation dataset
             test_dataset: Optional test dataset for final evaluation
-            eval_fn: Optional custom evaluation function that takes (batch, model_output) -> ModelOutput.
-                    If None, uses default pass-through evaluation that returns model_output unchanged.
+            custom_eval_fn: Optional custom evaluation function that takes (batch, model_output) -> dict of quantities (possbily full tensors).
+                    If None, uses default pass-through evaluation that returns loss from model output.
+                    NOTE: These will have to be gathered across processes - if you return a per-batch quantity
+                    It will be gathered to a size N_devices tensor. If you return tensors with more than one quantity
+                    they will be padded and then gathered along the first dimension.
+            custom_eval_log_fn: Optional function to log full eval evaluation metrics. By default its just going to cat and mean the quantities
+                    and log them.
         
         Stores all configuration objects and datasets, initializes Accelerator which handles
         device placement, distributed training, and mixed precision automatically based on
@@ -177,36 +235,48 @@ class MetalSiteTrainer:
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
         self.test_dataset = test_dataset
-        self.eval_fn = eval_fn if eval_fn is not None else lambda batch, output: output
+        self.custom_eval_fn = custom_eval_fn if custom_eval_fn is not None else lambda batch, output: getattr(output, 'loss', None)
+        self.custom_eval_log_fn = custom_eval_log_fn if custom_eval_log_fn is not None else _default_eval_log_fn
 
         # initialize training objects
         self._setup_accelerator() # first so that we can get is_main_process
+        self._base_logger = logger
         self._setup_output_dirs()
         self._setup_model()
         self._setup_data_loaders()
         self._setup_optimizer_and_scheduler()
         self._setup_logging_and_checkpointing()
         self._load_checkpoint_if_resuming()
-    
+
+    @main_process_only
+    def log_info(self, msg):
+        self._base_logger.info(msg)
+
+    @main_process_only
+    def log_warning(self, msg):
+        self._base_logger.warning(msg)
+
+    @main_process_only
+    def log_debug(self, msg):
+        self._base_logger.debug(msg)
+
+    @main_process_only
     def _setup_output_dirs(self) -> None:
         """
         Create output directory, making sure to check for existence first.
         """
-        if self.accelerator.is_main_process:
-            if os.path.exists(self.training_config.run_dir):
-                if self.training_config.overwrite_output_dir:
-                    logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
-                    shutil.rmtree(self.training_config.run_dir)
-                else:
-                    raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
-                                        "Set overwrite_output_dir=True to overwrite.")
-            os.makedirs(self.training_config.run_dir, exist_ok=True)
-            os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
-            os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
-            logger.info(f"Created output directory at {self.training_config.run_dir}")
-        
-        self.accelerator.wait_for_everyone()
-
+        if os.path.exists(self.training_config.run_dir):
+            if self.training_config.overwrite_output_dir:
+                logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
+                shutil.rmtree(self.training_config.run_dir)
+            else:
+                raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
+                                    "Set overwrite_output_dir=True to overwrite.")
+        os.makedirs(self.training_config.run_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
+        logger.info(f"Created output directory at {self.training_config.run_dir}")
+    
     def _setup_accelerator(self) -> None:
         """
         Initialize Accelerate infrastructure.
@@ -247,8 +317,8 @@ class MetalSiteTrainer:
         assert issubclass(self.model_class, EquiformerWEdgesModel), "model_class must be EquiformerWEdgesModel or subclass"
         self.model = None
         self.ema_object = None
-        if self.accelerator.is_main_process:
-            logger.warning("`_setup_model` dry run called.")
+
+        self.log_warning("`_setup_model` dry run called.")
     
     def _setup_data_loaders(self) -> None:
         """
@@ -298,10 +368,10 @@ class MetalSiteTrainer:
         else:
             self.test_loader = None
 
-        if self.accelerator.is_main_process:
-            logger.info(f"Created data loaders: train={len(self.train_loader)} total batches, "
-                    f"val={len(self.val_loader)} total batches" + 
-                    (f", test={len(self.test_loader)} total batches" if self.test_loader else ""))
+
+        self.log_info(f"Created data loaders: train={len(self.train_loader)} total batches, "
+                f"val={len(self.val_loader)} total batches" + 
+                (f", test={len(self.test_loader)} total batches" if self.test_loader else ""))
         
         # send the datasets to their respective devices
         self.train_loader = self.accelerator.prepare(self.train_loader)
@@ -311,14 +381,13 @@ class MetalSiteTrainer:
             self.test_loader = self.accelerator.prepare(self.test_loader)
 
         # log new length
-        if self.accelerator.is_main_process:
-            num_steps = len(self.train_loader)
-            effective_step_size = self.training_config.batch_size * self.accelerator.num_processes
-            logger.info(f"On device training loader={num_steps} total steps of size {effective_step_size}")
+        num_steps = len(self.train_loader)
+        effective_step_size = self.training_config.batch_size * self.accelerator.num_processes
+        self.log_info(f"On device training loader={num_steps} total steps of size {effective_step_size}")
 
-            # also log gradient accumulation related stats, maybe this should go in a different method
-            effective_batch_size = effective_step_size * (self.training_config.gradient_accumulation_steps or 1)
-            logger.info(f"Effective batch size per step (all devices + accumulation) = {effective_batch_size}")
+        # also log gradient accumulation related stats, maybe this should go in a different method
+        effective_batch_size = effective_step_size * (self.training_config.gradient_accumulation_steps or 1)
+        self.log_info(f"Effective batch size per step (all devices + accumulation) = {effective_batch_size}")
 
         self.accelerator.wait_for_everyone()
         
@@ -334,9 +403,9 @@ class MetalSiteTrainer:
         """
         self.optimizer = None
         self.scheduler = None
-        if self.accelerator.is_main_process:
-            logger.warning("`_setup_optimizer_and_scheduler` dry run called.")
-    
+
+        self.log_warning("`_setup_optimizer_and_scheduler` dry run called.")
+
     def _setup_logging_and_checkpointing(self) -> None:
         """
         Configure logging and checkpoint management.
@@ -353,9 +422,9 @@ class MetalSiteTrainer:
         self.best_step = None
         self.evals_no_improve = 0
         self._metrics_cache = {}
-        if self.accelerator.is_main_process:
-            logger.warning("`_setup_logging_and_checkpointing` dry run called.")
-    
+
+        self.log_warning("`_setup_logging_and_checkpointing` dry run called.")
+
     def _load_checkpoint_if_resuming(self) -> None:
         """
         Load checkpoint using Accelerate utilities.
@@ -365,9 +434,8 @@ class MetalSiteTrainer:
         automatically, optionally resets optimizer state if reset_optimizer is True, and
         restores training metadata for continuing from correct epoch/step.
         """
-        if self.accelerator.is_main_process:
-            logger.warning("`_load_checkpoint_if_resuming` dry run called.")
-    
+        self.log_warning("`_load_checkpoint_if_resuming` dry run called.")
+
     def run(self) -> None:
         """
         Execute the main training loop with Accelerate management.
@@ -417,8 +485,22 @@ class MetalSiteTrainer:
             _ = self._train_step(batch)
 
 
-            #check for eval, checkpoint, early stop, etc
-            # TODO
+            #check for eval
+            if self._should_eval():
+
+                self.accelerator.wait_for_everyone()
+                self.log_debug("Beginning validation ...")
+
+                eval_metrics = self._validate()
+                self.log_info(f"Eval metrics at step {self.global_step}: {eval_metrics}")
+
+                if self.training_config.primary_metric is not None:
+                    assert self.training_config.primary_metric in eval_metrics, \
+                        f"Primary metric {self.training_config.primary_metric} not found in eval metrics"
+                    
+
+                # checkpoint, early stop, etc
+                # TODO
 
         return None
     
@@ -503,8 +585,8 @@ class MetalSiteTrainer:
 
         if final:
             # checking that gether creates the correct shape on multiple devices
-            if self.accelerator.is_main_process:
-                logger.debug(f"Gathered train metrics at step {self.global_step}: {self._metrics_cache}") 
+
+            self.log_debug(f"Gathered train metrics at step {self.global_step}: {self._metrics_cache}") 
 
             avg_metrics = {}
             for key in self._metrics_cache.keys():
@@ -519,8 +601,8 @@ class MetalSiteTrainer:
                     all_values = torch.cat(self._metrics_cache[key])
                     
                     # checking that gether creates the correct shape on multiple devices
-                    if self.accelerator.is_main_process:
-                        logger.debug(f"Averaging {key} over tensor shape {all_values.shape}")
+
+                    self.log_debug(f"Averaging {key} over tensor shape {all_values.shape}")
 
                     avg_metrics[key] = all_values.mean().item()
 
@@ -537,17 +619,58 @@ class MetalSiteTrainer:
             
         Sets model to evaluation mode, iterates through validation DataLoader with automatic
         device handling, performs forward passes with accelerator's automatic mixed precision,
-        applies custom eval_fn if provided, uses accelerator.gather() to collect results from
+        applies custom custom_eval_fn if provided, uses accelerator.gather() to collect results from
         all processes in distributed setting, and returns aggregated validation metrics..
         """
+        # set model to eval mode
+        # self.model.eval()
+        # loop over batches and call evaluate batch (which will use custom eval fn if provided)
         if self.accelerator.is_main_process:
-            logger.warning("`_validate` dry run called.")
-        return {'loss': 0.0}
+            pbar = tqdm(
+                enumerate(self.val_loader),
+                total=len(self.val_loader),
+                desc="Validation",
+                disable=False
+            )
+        else:
+            pbar = enumerate(self.val_loader)
+
+        all_metrics = {}
+        for batch_idx, batch in pbar:
+            # these metrics are just on this device
+            # they might be a single scaler such as a loss
+            # or they might be per node quantities
+            batch_metrics = self._evaluate_batch(batch)
+
+            # gather them across processes keep appending to a dict of list from the results
+            # If originally they were scalars they will now be a [n_processes] tensor
+            # If originally they were per node they will be [total_nodes_all_processes, ... eg padded TODO: NEED TO CONFIRM THIS]
+            # they also get sent to cpu here so we don't fill up gpu memory storing full eval results
+            gathered_metrics = self._gather_metrics(batch_metrics)
+            for key, tensor in gathered_metrics.items():
+                if key not in all_metrics:
+                    all_metrics[key] = []
+                all_metrics[key].append(tensor)
+
+        self.log_debug(f"Gathered all eval metrics: {all_metrics}")
+        for key, tensors_list in all_metrics.items():
+            one_tensor = tensors_list[0]
+            self.log_debug(f"Eval metric '{key}' first tensor shape: {one_tensor.shape}")
+
+        # dict of list of tensors is now the expected format for the eval log fn
+        # by defualt it will just cat and mean them
+        all_metrics = self.custom_eval_log_fn(self, all_metrics)
+        
+        # convert model back to train mode
+        # self.model.train()
+
+        self.accelerator.wait_for_everyone()
+        return all_metrics
     
     def _evaluate_batch(
         self, 
         batch: BatchProteinData
-    ) -> ModelOutput:
+    ) -> Dict[str, torch.Tensor]:
         """
         Evaluate single batch with custom evaluation function.
         
@@ -558,31 +681,122 @@ class MetalSiteTrainer:
             ModelOutput containing evaluation results
             
         Performs forward pass through model with batch already on correct device via accelerator,
-        applies custom eval_fn if provided during initialization (otherwise returns model output
-        unchanged), handles any additional metric computation specified by eval_fn, and returns
-        ModelOutput with computed metrics ready for aggregation across processes.
+        applies custom custom_eval_fn if provided during initialization,
+        shapes the resulting tensors for distributed gathering.
         """
-        raise NotImplementedError("Batch evaluation not implemented yet.")
-    
-    def _aggregate_metrics(
+        # generate a fake loss based on current step
+        fake_loss = torch.tensor(10.0**(1/(self.global_step**.2)), device=self.accelerator.device)
+
+        # generate a fake tensor based on process number * 10
+        fake_values = torch.tensor([1]*((self.accelerator.state.process_index+1)*10), device=self.accelerator.device)
+        return {'loss': fake_loss, 'values': fake_values, 'num_nodes': torch.tensor(len(batch.element), device=self.accelerator.device)}
+
+    def _gather_metrics(
         self, 
-        metrics: Dict[str, float]
-    ) -> Dict[str, float]:
+        metrics: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         """
-        Aggregate metrics across processes using Accelerate.
+        Gather metrics across processes, handling both scalar and per-node tensors, places them on cpu.
+        For per-node tensors, automatically removes padding after gathering.
         
         Args:
-            metrics: Dictionary of metrics from current process
+            metrics: Dict of metric_name -> tensor from current process
+                    Tensors can be:
+                    - Scalar (shape [] or [1]): single value per batch 
+                    - BROKEN Per-node (shape [n_nodes] or [n_nodes, features]): values per node
+                    - BROKEN Other? Will be padded and concated along 0th dimension
             
         Returns:
-            Dictionary of aggregated metrics across all processes
-            
-        Uses accelerator.gather() to collect metric tensors from all processes, performs
-        appropriate aggregation (mean, sum) based on metric type, handles synchronization
-        automatically through accelerator utilities, and returns final metrics that represent
-        performance across entire distributed system. Only main process receives final results.
+            Dict of gathered tensors ready for aggregation
+            - Scalar tensors: [num_processes] shape, ready for mean/sum
+            - Per-node tensors: [total_valid_nodes_all_processes, ...] shape with padding removed
         """
-        raise NotImplementedError("Metric aggregation not implemented yet.")
+        gathered_metrics = {}
+        
+        for key, tensor in metrics.items():
+            if tensor is None:
+                continue
+                
+            # Ensure tensor is actually a tensor
+            if not isinstance(tensor, torch.Tensor):
+                tensor = torch.tensor(tensor, device=self.accelerator.device)
+            
+            # Detect if this is a scalar or per-node metric
+            is_scalar = tensor.numel() == 1 or (tensor.ndim >= 1 and tensor.shape[0] == 1)
+            
+            if is_scalar:
+                # Scalar metric - use gather_for_metrics
+                if tensor.ndim == 0:
+                    tensor = tensor.unsqueeze(0)
+                elif tensor.shape[0] != 1:
+                    tensor = tensor.mean().unsqueeze(0)
+                    
+                gathered_metrics[key] = self.accelerator.gather_for_metrics(tensor).cpu()
+                
+            else:
+                self.log_warning(f"Non batch-level metrics (eg. more than one quantity per batch): ({key}) with shape ({tensor.shape}) are not currently supported due to `accelerator.pad_across_proceses` hanging.")
+                continue
+                # Per-node metric - pad, gather, then remove padding
+                original_length = tensor.shape[0]
+                
+                # Create validity mask for this process (all True initially)
+                validity_mask = torch.ones(original_length, dtype=torch.bool, device=tensor.device)
+                
+                try:
+                    # Pad tensor and validity mask
+                    padded_tensor = self.accelerator.pad_across_processes(tensor, dim=0)
+                    padded_mask = self.accelerator.pad_across_processes(validity_mask, dim=0)
+                    
+                    # Gather both tensor and mask
+                    gathered_tensor = self.accelerator.gather(padded_tensor).cpu()
+                    gathered_mask = self.accelerator.gather(padded_mask).cpu()
+                    
+                    # Apply mask to remove padding - only keep valid entries
+                    if gathered_tensor.ndim == 1:
+                        # 1D tensor: simple boolean indexing
+                        clean_tensor = gathered_tensor[gathered_mask]
+                    else:
+                        # Multi-dimensional tensor: mask along first dimension
+                        clean_tensor = gathered_tensor[gathered_mask]
+                    
+                    gathered_metrics[key] = clean_tensor
+                    
+                    # Log info about padding removal
+                    total_gathered = gathered_tensor.shape[0]
+                    valid_count = clean_tensor.shape[0]
+                    padded_count = total_gathered - valid_count
+                    self.log_debug(f"Gathered metric '{key}': {valid_count} valid, {padded_count} padded entries removed")
+                    
+                except Exception as e:
+                    self.accelerator.print(f"Warning: Failed to pad tensor {key} with shape {tensor.shape}, "
+                                        f"attempting direct gather: {e}")
+                    try:
+                        # Fallback: direct gather (assumes no padding needed)
+                        gathered_tensor = self.accelerator.gather(tensor).cpu()
+                        gathered_metrics[key] = gathered_tensor
+                        self.log_debug(f"Gathered metric '{key}' via direct gather: shape {gathered_tensor.shape}")
+                    except Exception as e2:
+                        self.accelerator.print(f"Error: Failed to gather {key}: {e2}")
+                        continue
+        
+        return gathered_metrics
+
+    def _should_eval(self):
+        """
+        Determine if evaluation should be run this step.
+        
+        Returns:
+            Boolean indicating whether to run evaluation
+            
+        Uses eval_every from training_config to decide if current global_step
+        warrants an evaluation run. Also makes sure we have a validation dataset
+        """
+        if self.val_loader is None:
+            return False
+        if self.training_config.eval_every is None:
+            return False
+        
+        return self.global_step % self.training_config.eval_every == 0
     
     def _should_checkpoint(
         self, 
@@ -663,9 +877,9 @@ class MetalSiteTrainer:
         consistent distributed behavior.
         """
         self.accelerator.log({f"{prefix}{k}": v for k, v in metrics.items()}, step=self.global_step)
-        if self.accelerator.is_main_process:
-            log_msg = f"Step {self.global_step}: " + ", ".join([f"{prefix}{k}={v:.4f}" for k, v in metrics.items()])
-            logger.info(log_msg)
+
+        log_msg = f"Step {self.global_step}: " + ", ".join([f"{prefix}{k}={v:.4f}" for k, v in metrics.items()])
+        self.log_info(log_msg)
     
     def _cleanup(self) -> None:
         """
@@ -675,4 +889,4 @@ class MetalSiteTrainer:
         resources, closes logging handlers, performs final checkpoint save if needed,
         and handles graceful shutdown of all infrastructure managed by accelerator.
         """
-        logger.warning("`_cleanup` dry run called.")
+        self.log_warning("`_cleanup` dry run called.")

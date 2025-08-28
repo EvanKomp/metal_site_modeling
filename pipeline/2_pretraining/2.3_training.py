@@ -31,7 +31,7 @@ def setup_logging(log_file: str) -> logging.Logger:
     if local_rank == 0:
 
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.DEBUG,
             format='%(asctime)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler(log_file, mode='w'),
