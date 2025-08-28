@@ -5,161 +5,135 @@
 * Company: National Renewable Energy Lab, Bioeneergy Science and Technology
 * License: MIT
 '''
-# metalsitenn/plotting.py
-'''
-* Author: Evan Komp
-* Created: 11/26/2024
-* Company: National Renewable Energy Lab, Bioeneergy Science and Technology
-* License: MIT
-'''
 import torch
 from typing import List, Optional, Union
+import numpy as np
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 
-from metalsitenn.atom_vocabulary import AtomTokenizer
-
-def plot_atoms_and_vectors(
-    positions: torch.Tensor, 
-    atom_tokens: Union[List[str], torch.Tensor]=None,
-    atom_types: List[int]=None,
-    tokenizer: Optional[AtomTokenizer] = None,
-    atom_values: Optional[torch.Tensor] = None,
-    vectors: Optional[torch.Tensor] = None,
-    title: str = "",
-    ax = None,
-    quiver_multiplier: float=1.0,
-    quiver_mask: Optional[torch.Tensor] = None,
-    atom_highlight: Optional[torch.Tensor] = None,
-    unhighlight_alpha: float=0.4,
-    quiver_color: str = 'green'
-) -> None:
-    """Plot 3D atomic structure with optional vector field for visualizing equivariance.
-    
-    Color preference hierarchy:
-    1. atom_values: Uses viridis colormap with continuous colorbar
-    2. atom_tokens: Uses tab20 colormap with discrete colorbar
-    3. No color specified: All markers are grey
-    
-    Marker shapes:
-    - atom_types=0: Circle markers
-    - atom_types=1: Square markers
+def confusion_from_matrix(
+    confusion_matrix: torch.Tensor,
+    vocab: Optional[List[str]] = None,
+    save_path: Optional[str] = None,
+    figsize: tuple = (8, 8),
+    normalize: bool = True,
+    show_values: bool = True,
+    cmap: str = 'Blues',
+    title: str = 'Confusion Matrix',
+    aggregate_no_support: bool = True
+) -> plt.Figure:
+    """
+    Create a confusion matrix plot from a square counts matrix.
     
     Args:
-        positions: [N,3] tensor of atomic coordinates
-        atom_tokens: List of N atomic tokens or tensor of token indices
-        atom_types: List of N atomic types (0 for circle, 1 for square)
-        tokenizer: AtomTokenizer object for mapping atom tokens to colors
-        atom_values: Optional [N,1] tensor of scalar quantities to color atoms
-        vectors: Optional [N,3] tensor of vector quantities to plot as arrows
-        title: Title of the plot
-        ax: Optional matplotlib axis to plot on
-        quiver_multiplier: Multiplier for the length of the vectors
-        quiver_mask: Optional mask to plot only a subset of the vectors
-        atom_highlight: Optional mask to highlight specific atoms
-        unhighlight_alpha: Transparency of unhighlighted atoms
-        quiver_color: Color of the vectors
+        confusion_matrix: Square tensor of shape (C, C) with confusion matrix counts
+        vocab: Optional list of class name strings. If None, uses indices.
+        save_path: Optional path to save the figure as PNG
+        figsize: Figure size as (width, height)
+        normalize: If True, normalize the confusion matrix by row (true labels)
+        show_values: If True, show the numeric values in each cell
+        cmap: Colormap for the plot
+        title: Title for the plot
+        aggregate_no_support: If True, aggregate classes with no true examples into "OTHER"
+        
+    Returns:
+        matplotlib Figure object
     """
-    if ax is None:
-        fig = plt.figure(figsize=(8, 8))
-        ax = fig.add_subplot(111, projection='3d')
-
-    positions = positions.detach().numpy()
-    vectors = vectors.detach().numpy() if vectors is not None else None
-    
-    # Determine colors and create appropriate colorbar
-    if atom_values is not None:
-        # Continuous colormap for scalar values
-        cmap = plt.cm.viridis
-        norm = plt.Normalize(vmin=atom_values.min(), vmax=atom_values.max())
-        colors = cmap(norm(atom_values))
-        
-        # Add colorbar
-        sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-        plt.colorbar(sm, ax=ax, label='Atom Values')
-        
-    elif atom_tokens is not None:
-        # Discrete colors for atom tokens
-        assert tokenizer is not None, "Must provide tokenizer to map atom symbols to colors"
-        
-        # Convert tensor indices to tokens if needed
-        if isinstance(atom_tokens, torch.Tensor):
-            atom_tokens = [tokenizer.atom_vocab.itos[idx.item()] for idx in atom_tokens]
-
-        # get token indices and all possible indices
-        unique_indices = set(tokenizer.atom_vocab.stoi.values())
-        atom_indices = [tokenizer.atom_vocab.stoi[token] for token in atom_tokens]
-        cmap = plt.cm.tab20
-        
-        # Create color mapping
-        color_dict = {ind: cmap(i/len(unique_indices)) for i, ind in enumerate(unique_indices)}
-        colors = [color_dict[ind] for ind in atom_indices]
-
-        # create token to color to legend
-        token_to_color = {token: color_dict[ind] for token, ind in tokenizer.atom_vocab.stoi.items()}
-        
+    # Convert to numpy if it's a tensor
+    if isinstance(confusion_matrix, torch.Tensor):
+        cm = confusion_matrix.cpu().numpy()
     else:
-        # Default grey for all markers
-        colors = ['grey'] * len(positions)
-        token_to_color = None
-
-    # Create legend elements
-    legend_elements = []
+        cm = np.array(confusion_matrix)
     
-    # Add color legend if using atom_tokens
-    if token_to_color is not None:
-        legend_elements.extend([
-            Line2D([0], [0], marker='o', color='w', label=token, 
-                  markerfacecolor=color, markersize=10)
-            for token, color in token_to_color.items()
-        ])
+    # Create class labels
+    if vocab is None:
+        labels = [str(i) for i in range(cm.shape[0])]
+    else:
+        labels = vocab[:cm.shape[0]]  # Trim vocab if it's longer than matrix
+    
+    # Handle aggregation of classes with no support
+    if aggregate_no_support:
+        # Find classes with no true examples (row sums are 0)
+        row_sums = cm.sum(axis=1)
+        no_support_indices = np.where(row_sums == 0)[0]
         
-    # Add shape legend if using atom_types
-    if atom_types is not None:
-        shape_elements = [
-            Line2D([0], [0], marker='o', color='grey', label='HETATM', 
-                  markersize=10, linestyle='None'),
-            Line2D([0], [0], marker='s', color='grey', label='ATM', 
-                  markersize=10, linestyle='None')
-        ]
-        # Add shape elements at the beginning of the legend
-        legend_elements = shape_elements + legend_elements
-
-    # Plot atoms with appropriate markers and colors
-    for i, pos in enumerate(positions):
-        if atom_highlight is not None:
-            alpha = 1.0 if i in atom_highlight else unhighlight_alpha
-        else:
-            alpha = 1.0
+        if len(no_support_indices) > 0:
+            # Find indices with support
+            support_indices = np.where(row_sums > 0)[0]
             
-        # Determine marker shape based on atom_types
-        marker = 's' if (atom_types is not None and atom_types[i] == 1) else 'o'
-        
-        ax.scatter(*pos, c=[colors[i]], s=100, alpha=alpha, marker=marker)
-
-    # Add legend if we have any legend elements
-    if legend_elements:
-        ax.legend(handles=legend_elements, 
-                 bbox_to_anchor=(1.15, 1), 
-                 loc='upper left')
-
-    # Plot vectors as arrows if provided
-    if vectors is not None:
-        end_points = vectors * quiver_multiplier
-        if quiver_mask is not None:
-            positions = positions[quiver_mask]
-            end_points = end_points[quiver_mask]
-
-        ax.quiver(
-            positions[:,0], positions[:,1], positions[:,2],
-            end_points[:,0], end_points[:,1], end_points[:,2],
-            color=quiver_color, alpha=1.0
-        )
-
-    # Set equal aspect ratio
-    ax.set_box_aspect([1,1,1])
-    ax.set_title(title)
+            # Create new confusion matrix with supported classes + OTHER
+            new_size = len(support_indices) + 1  # +1 for OTHER
+            new_cm = np.zeros((new_size, new_size))
+            new_labels = []
+            
+            # Copy supported classes
+            for i, orig_idx in enumerate(support_indices):
+                for j, orig_col_idx in enumerate(support_indices):
+                    new_cm[i, j] = cm[orig_idx, orig_col_idx]
+                new_labels.append(labels[orig_idx])
+            
+            # Aggregate predictions for no-support classes into OTHER column
+            other_col_sum = cm[:, no_support_indices].sum(axis=1)
+            for i, orig_idx in enumerate(support_indices):
+                new_cm[i, -1] = other_col_sum[orig_idx]  # Predictions to OTHER classes
+            
+            # OTHER row: aggregate all true OTHER predictions
+            # This represents cases where true label was a no-support class
+            other_row_sum = cm[no_support_indices, :].sum(axis=0)
+            for j, orig_col_idx in enumerate(support_indices):
+                new_cm[-1, j] = other_row_sum[orig_col_idx]  # OTHER true -> supported predictions
+            
+            # OTHER-to-OTHER: predictions from no-support to no-support
+            new_cm[-1, -1] = cm[np.ix_(no_support_indices, no_support_indices)].sum()
+            
+            # Update variables
+            cm = new_cm
+            labels = new_labels + ['OTHER']
     
-    return ax
+    # Normalize if requested
+    if normalize:
+        # Add small epsilon to avoid division by zero warnings
+        eps = 1e-15
+        row_sums = cm.sum(axis=1)
+        cm = cm.astype('float') / (row_sums[:, np.newaxis] + eps)
+        # Set rows with zero sum to zero (instead of using nan_to_num)
+        zero_rows = row_sums == 0
+        cm[zero_rows, :] = 0
+    
+    # Create the plot
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
+    ax.figure.colorbar(im, ax=ax)
+    
+    # Set ticks and labels
+    ax.set(xticks=np.arange(cm.shape[1]),
+           yticks=np.arange(cm.shape[0]),
+           xticklabels=labels,
+           yticklabels=labels,
+           title=title,
+           ylabel='True label',
+           xlabel='Predicted label')
+    
+    # Rotate the tick labels and set their alignment
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+    
+    # Add text annotations if requested
+    if show_values:
+        fmt = '.2f' if normalize else 'd'
+        thresh = cm.max() / 2.
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, format(cm[i, j], fmt),
+                       ha="center", va="center",
+                       color="white" if cm[i, j] > thresh else "black")
+    
+    fig.tight_layout()
+    
+    # Save if path provided
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches='tight')
+    
+    return fig

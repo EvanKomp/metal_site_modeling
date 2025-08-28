@@ -81,4 +81,5 @@ stages:
     plots:
     - data/2/2.3_pretraining/dvclive/plots/metrics:
         x: step
+    - data/2/2.3_pretraining/dvclive/plots/images/eval_confusion_matrix.png
 

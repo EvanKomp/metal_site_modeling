@@ -170,8 +170,8 @@ def _default_eval_log_fn(trainer, metrics: Dict[str, torch.Tensor]):
         all_values = torch.cat(list_of_tensors)
         if len(all_values) != (len(trainer.val_loader)*trainer.accelerator.num_processes):
             if trainer.accelerator.is_main_process:
-                logger.warning(f"Eval metric {key} does not have the length equal to the total number of eval batches, but is going to be meaned anyway. It may not have a signficant meaning.")
-                
+                logger.warning(f"Eval metric {key} does not have the length equal to the total number of eval batches, but is going to be meaned anyway. It may not have a signficant meaning, shape is {all_values.shape}")
+
         mean_value = all_values.float().mean().item()
         agg_metrics[key] = mean_value
 
@@ -652,7 +652,7 @@ class MetalSiteTrainer:
                     all_metrics[key] = []
                 all_metrics[key].append(tensor)
 
-        self.log_debug(f"Gathered all eval metrics: {all_metrics}")
+        self.log_debug(f"Gathered all eval metrics: {all_metrics.keys()}")
         for key, tensors_list in all_metrics.items():
             one_tensor = tensors_list[0]
             self.log_debug(f"Eval metric '{key}' first tensor shape: {one_tensor.shape}")
@@ -678,7 +678,7 @@ class MetalSiteTrainer:
             batch: Batch of molecular data (device placement handled by accelerator)
             
         Returns:
-            ModelOutput containing evaluation results
+            Dict containing per batch metrics to be gathered across processes.
             
         Performs forward pass through model with batch already on correct device via accelerator,
         applies custom custom_eval_fn if provided during initialization,
@@ -686,11 +686,16 @@ class MetalSiteTrainer:
         """
         # generate a fake loss based on current step
         fake_loss = torch.tensor(10.0**(1/(self.global_step**.2)), device=self.accelerator.device)
+        cel_loss = fake_loss * 0.8
 
-        # generate a fake tensor based on process number * 10
-        fake_values = torch.tensor([1]*((self.accelerator.state.process_index+1)*10), device=self.accelerator.device)
-        return {'loss': fake_loss, 'values': fake_values, 'num_nodes': torch.tensor(len(batch.element), device=self.accelerator.device)}
+        # and some fake logits
+        fake_logits = torch.randn((len(batch.element), self.model_config.feature_vocab_sizes['element']), device=self.accelerator.device)
+        model_outs = ModelOutput(loss=fake_loss, node_logits=fake_logits, node_loss=cel_loss)
 
+        metrics = self.custom_eval_fn(batch, model_outs)
+
+        return metrics
+    
     def _gather_metrics(
         self, 
         metrics: Dict[str, torch.Tensor]
@@ -734,50 +739,52 @@ class MetalSiteTrainer:
                 gathered_metrics[key] = self.accelerator.gather_for_metrics(tensor).cpu()
                 
             else:
-                self.log_warning(f"Non batch-level metrics (eg. more than one quantity per batch): ({key}) with shape ({tensor.shape}) are not currently supported due to `accelerator.pad_across_proceses` hanging.")
-                continue
-                # Per-node metric - pad, gather, then remove padding
-                original_length = tensor.shape[0]
+                # self.log_warning(f"Non batch-level metrics (eg. more than one quantity per batch): ({key}) with shape ({tensor.shape}) are not currently must be the same shape due to `accelerator.pad_across_proceses` hanging.")
+
+                gathered_metrics[key] = self.accelerator.gather_for_metrics(tensor).cpu()
+                # self.log_debug(f"Gathered metric '{key}': shape {gathered_metrics[key].shape}")
+                # # Per-node metric - pad, gather, then remove padding
+                # original_length = tensor.shape[0]
                 
-                # Create validity mask for this process (all True initially)
-                validity_mask = torch.ones(original_length, dtype=torch.bool, device=tensor.device)
+                # # Create validity mask for this process (all True initially)
+                # validity_mask = torch.ones(original_length, dtype=torch.bool, device=tensor.device)
                 
-                try:
-                    # Pad tensor and validity mask
-                    padded_tensor = self.accelerator.pad_across_processes(tensor, dim=0)
-                    padded_mask = self.accelerator.pad_across_processes(validity_mask, dim=0)
+                # try:
+                #     # Pad tensor and validity mask
+                #     padded_tensor = self.accelerator.pad_across_processes(tensor, dim=0)
+                #     padded_mask = self.accelerator.pad_across_processes(validity_mask, dim=0)
                     
-                    # Gather both tensor and mask
-                    gathered_tensor = self.accelerator.gather(padded_tensor).cpu()
-                    gathered_mask = self.accelerator.gather(padded_mask).cpu()
+                #     # Gather both tensor and mask
+                #     gathered_tensor = self.accelerator.gather(padded_tensor).cpu()
+                #     gathered_mask = self.accelerator.gather(padded_mask).cpu()
                     
-                    # Apply mask to remove padding - only keep valid entries
-                    if gathered_tensor.ndim == 1:
-                        # 1D tensor: simple boolean indexing
-                        clean_tensor = gathered_tensor[gathered_mask]
-                    else:
-                        # Multi-dimensional tensor: mask along first dimension
-                        clean_tensor = gathered_tensor[gathered_mask]
+                #     # Apply mask to remove padding - only keep valid entries
+                #     if gathered_tensor.ndim == 1:
+                #         # 1D tensor: simple boolean indexing
+                #         clean_tensor = gathered_tensor[gathered_mask]
+                #     else:
+                #         # Multi-dimensional tensor: mask along first dimension
+                #         clean_tensor = gathered_tensor[gathered_mask]
                     
-                    gathered_metrics[key] = clean_tensor
+                #     gathered_metrics[key] = clean_tensor
                     
-                    # Log info about padding removal
-                    total_gathered = gathered_tensor.shape[0]
-                    valid_count = clean_tensor.shape[0]
-                    padded_count = total_gathered - valid_count
-                    self.log_debug(f"Gathered metric '{key}': {valid_count} valid, {padded_count} padded entries removed")
+                #     # Log info about padding removal
+                #     total_gathered = gathered_tensor.shape[0]
+                #     valid_count = clean_tensor.shape[0]
+                #     padded_count = total_gathered - valid_count
+                #     self.log_debug(f"Gathered metric '{key}': {valid_count} valid, {padded_count} padded entries removed")
                     
-                except Exception as e:
-                    self.accelerator.print(f"Warning: Failed to pad tensor {key} with shape {tensor.shape}, "
-                                        f"attempting direct gather: {e}")
-                    try:
-                        # Fallback: direct gather (assumes no padding needed)
-                        gathered_tensor = self.accelerator.gather(tensor).cpu()
-                        gathered_metrics[key] = gathered_tensor
-                        self.log_debug(f"Gathered metric '{key}' via direct gather: shape {gathered_tensor.shape}")
-                    except Exception as e2:
-                        self.accelerator.print(f"Error: Failed to gather {key}: {e2}")
-                        continue
+                # except Exception as e:
+                #     self.accelerator.print(f"Warning: Failed to pad tensor {key} with shape {tensor.shape}, "
+                #                         f"attempting direct gather: {e}")
+                #     try:
+                #         # Fallback: direct gather (assumes no padding needed)
+                #         gathered_tensor = self.accelerator.gather(tensor).cpu()
+                #         gathered_metrics[key] = gathered_tensor
+                #         self.log_debug(f"Gathered metric '{key}' via direct gather: shape {gathered_tensor.shape}")
+                #     except Exception as e2:
+                #         self.accelerator.print(f"Error: Failed to gather {key}: {e2}")
+                #         continue
         
         return gathered_metrics
 
