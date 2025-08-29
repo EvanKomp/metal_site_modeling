@@ -148,6 +148,13 @@ def main_process_only(func: Callable) -> Callable:
     return wrapper
 
 ######################################################################
+# Early stopping exception
+######################################################################
+class EarlyStoppingException(Exception):
+    """Custom exception for early stopping."""
+    pass
+
+######################################################################
 # Used of user does not provide to convert metric results from all batches in
 # the eval set to a final output dict and log statements.
 # Note, custom behavior must call trainer._log_metrics if it wants DVC to be tracking its eval quantities.
@@ -239,7 +246,7 @@ class MetalSiteTrainer:
         self.custom_eval_log_fn = custom_eval_log_fn if custom_eval_log_fn is not None else _default_eval_log_fn
 
         # initialize training objects
-        self._setup_accelerator() # first so that we can get is_main_process
+        self._setup_accelerator() # first so that we can get access to is_main_process
         self._base_logger = logger
         self._setup_output_dirs()
         self._setup_model()
@@ -260,23 +267,6 @@ class MetalSiteTrainer:
     def log_debug(self, msg):
         self._base_logger.debug(msg)
 
-    @main_process_only
-    def _setup_output_dirs(self) -> None:
-        """
-        Create output directory, making sure to check for existence first.
-        """
-        if os.path.exists(self.training_config.run_dir):
-            if self.training_config.overwrite_output_dir:
-                logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
-                shutil.rmtree(self.training_config.run_dir)
-            else:
-                raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
-                                    "Set overwrite_output_dir=True to overwrite.")
-        os.makedirs(self.training_config.run_dir, exist_ok=True)
-        os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
-        os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
-        logger.info(f"Created output directory at {self.training_config.run_dir}")
-    
     def _setup_accelerator(self) -> None:
         """
         Initialize Accelerate infrastructure.
@@ -303,6 +293,22 @@ class MetalSiteTrainer:
         
         self.accelerator.wait_for_everyone()
 
+    @main_process_only
+    def _setup_output_dirs(self) -> None:
+        """
+        Create output directory, making sure to check for existence first.
+        """
+        if os.path.exists(self.training_config.run_dir):
+            if self.training_config.overwrite_output_dir:
+                logger.warning(f"Output directory {self.training_config.run_dir} exists and will be overwritten.")
+                shutil.rmtree(self.training_config.run_dir)
+            else:
+                raise FileExistsError(f"Output directory {self.training_config.run_dir} already exists. "
+                                    "Set overwrite_output_dir=True to overwrite.")
+        os.makedirs(self.training_config.run_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.training_config.run_dir, "checkpoints"), exist_ok=True)
+        os.makedirs(os.path.join(self.training_config.run_dir, "dvclive"), exist_ok=True)
+        logger.info(f"Created output directory at {self.training_config.run_dir}")
 
     def _setup_model(self) -> None:
         """
@@ -422,10 +428,12 @@ class MetalSiteTrainer:
         self.best_step = None
         self.evals_no_improve = 0
         self._metrics_cache = {}
+        # TODO: register anything for checkpointing needed, eg. EMA and learning rate scheduler
+        # thinks like model and optimizer are already handled when we accelerator prepare them.
 
         self.log_warning("`_setup_logging_and_checkpointing` dry run called.")
 
-    def _load_checkpoint_if_resuming(self) -> None:
+    def _load_checkpoint_if_resuming(self, checkpoint_path: str=None) -> None:
         """
         Load checkpoint using Accelerate utilities.
         
@@ -434,21 +442,69 @@ class MetalSiteTrainer:
         automatically, optionally resets optimizer state if reset_optimizer is True, and
         restores training metadata for continuing from correct epoch/step.
         """
-        self.log_warning("`_load_checkpoint_if_resuming` dry run called.")
+        if checkpoint_path is None:
+            checkpoint_path = self.training_config.resume_from_checkpoint
+
+        # try to parse the step number from the checkpoint
+        # it should follow the form '...checkpoint_<step>'
+        step_num = checkpoint_path.split("checkpoint_")[-1]
+        step_num = int(step_num) if step_num.isdigit() else None
+        if step_num is None:
+            raise ValueError(f"Invalid checkpoint path: {checkpoint_path}, cannot parse global step")
+
+        # set global step to this point
+        # should this be set to plus 1? I dont think so because we use it to update the dataloader to this
+        # current point before first train step, then train step immediately ticks it
+        self.global_step = step_num
+
+        # actually load the checkpoint
+        self.accelerator.load_state(checkpoint_path)
+
+        self.log_warning(f"`_load_checkpoint_if_resuming` dry run called targeting {checkpoint_path}")
 
     def run(self) -> None:
         """
         Execute the main training loop with Accelerate management.
         
-        Runs complete training process with accelerator handling all infrastructure concerns,
-        uses accelerator.backward() for gradient computation, accelerator.clip_grad_norm_() for
-        gradient clipping, and accelerator utilities for metric gathering and synchronization.
-        Handles distributed training, mixed precision, and gradient accumulation transparently
-        through accelerator methods.
+        Runs complete training process. Its assumed that any resumption has already taken place by
+        _load_checkpoint_if_resuming() during init. Here we will jump the dataloader if we are resuming.
+        Note that if the batch size or number of devices changes since the loaded checkpoint this data jumping
+        is not rigorous anymore. Then begin training at that stage
         """
-        # TODO
-        self._train_epoch(1)
-    
+        if self.global_step != 0:
+            # get steps per epoch
+            steps_per_epoch = len(self.train_loader)
+            # get current epoch
+            current_epoch = (self.global_step // steps_per_epoch) + 1
+            # steps taken already in this epoch
+            steps_to_skip = self.global_step % steps_per_epoch
+
+            # patch over the dataloader for this first initial epoch
+            skipped_train_dataloader = self.accelerator.skip_first_batches(
+                self.train_loader, steps=steps_to_skip
+            )
+            self._train_loader = self.train_loader
+            self.train_loader = skipped_train_dataloader # self._train_epoch uses this attribute
+
+            # continue training at this point
+            self._train_epoch(current_epoch)
+
+            # Now we return you to your scheduled broadcast
+            self.train_loader = self._train_loader
+        else:
+            current_epoch = 1
+
+        # main loop
+        for epoch in range(current_epoch, self.training_config.num_epochs + 1):
+            try:
+                self._train_epoch(epoch)
+            except EarlyStoppingException:
+                self.log_info(f"Early stopping triggered at epoch {epoch}, step {self.global_step}, best metric {self.best_metric}")
+                break
+
+        # final cleanup
+        self._finalize_training()
+
     def _train_epoch(self, epoch: int) -> Dict[str, float]:
         """
         Execute one training epoch using Accelerate.
@@ -467,7 +523,6 @@ class MetalSiteTrainer:
         """
         # self.model.train()
         
-        
         # Progress bar (only on main process)
         if self.accelerator.is_main_process:
             pbar = tqdm(
@@ -479,11 +534,10 @@ class MetalSiteTrainer:
         else:
             pbar = enumerate(self.train_loader)
         
-        for batch_idx, batch in pbar:
+        for _, batch in pbar:
 
             # take step
             _ = self._train_step(batch)
-
 
             #check for eval
             if self._should_eval():
@@ -491,17 +545,52 @@ class MetalSiteTrainer:
                 self.accelerator.wait_for_everyone()
                 self.log_debug("Beginning validation ...")
 
+                # TODO: swap in EMA if present
+
                 eval_metrics = self._validate()
                 self.log_info(f"Eval metrics at step {self.global_step}: {eval_metrics}")
 
+                # TODO swap back in instananeous params from EMA
+                # we do not want ema params for checkpointing during training,
+                # the ema itself is checkpointed. The only time we want to save the model with
+                # the ema params is maybe the final save of the unsharder PretrainedModel
+
+                # do some checks for tracking best checkpoint and early stopping
                 if self.training_config.primary_metric is not None:
                     assert self.training_config.primary_metric in eval_metrics, \
                         f"Primary metric {self.training_config.primary_metric} not found in eval metrics"
-                    
 
-                # checkpoint, early stop, etc
-                # TODO
+                    tracked_eval_metric = eval_metrics[self.training_config.primary_metric]
+                    # check that it is a single quantity
+                    assert tracked_eval_metric.numel() == 1, "Primary metric must be a single quantity"
 
+                    # tick early stopping
+                    should_stop = self._tick_early_stopping(tracked_eval_metric)
+
+                    # keep track of the best metric, checkpoint will use this.
+                    if tracked_eval_metric < self.best_metric or self.best_metric is None:
+                        is_best = True
+                        self.best_metric = tracked_eval_metric
+                    else:
+                        is_best = False
+
+                    # now do a checkpoint
+                    self._save_checkpoint(is_best=is_best)
+
+                    # early stop
+                    if should_stop:
+                        raise EarlyStoppingException()
+                
+                else:
+                    # apparently we are too maverick for keeping track of the best or early stopping
+                    self._save_checkpoint() 
+
+                
+
+                # take a breath after eval
+                self.accelerator.wait_for_everyone()
+
+        self.log_info(f"Completed epoch {epoch}/{self.training_config.num_epochs}")
         return None
     
     def _train_step(
@@ -522,8 +611,6 @@ class MetalSiteTrainer:
 
         # take a step in this class
         self.global_step += 1
-        # take dvc live step
-        # TODO
 
         with self.accelerator.accumulate(self.model):
             outs = ModelOutput(
@@ -535,6 +622,7 @@ class MetalSiteTrainer:
             assert outs.loss is not None, "ModelOutput must contain loss for training step"
             loss = outs.loss.item()
             # self.accelerator.backward(outs.loss)
+            # clip?
             # self.optimizer.step()
             # self.scheduler.step()
             # self.optimizer.zero_grad()
@@ -620,7 +708,9 @@ class MetalSiteTrainer:
         Sets model to evaluation mode, iterates through validation DataLoader with automatic
         device handling, performs forward passes with accelerator's automatic mixed precision,
         applies custom custom_eval_fn if provided, uses accelerator.gather() to collect results from
-        all processes in distributed setting, and returns aggregated validation metrics..
+        all processes in distributed setting, and returns aggregated validation metrics.
+        NOTE EMA is not controlled inside of this method but in the main loop such that we only have
+        to swap parameters once in and once back out for validation and checkpointing.
         """
         # set model to eval mode
         # self.model.eval()
@@ -805,30 +895,13 @@ class MetalSiteTrainer:
         
         return self.global_step % self.training_config.eval_every == 0
     
-    def _should_checkpoint(
-        self, 
-        val_metrics: Dict[str, float], 
-    ) -> bool:
-        """
-        Determine checkpointing using distributed-aware comparison.
-        
-        Args:
-            val_metrics: Validation metrics (already aggregated across processes)
-            epoch: Current epoch number
-            
-        Returns:
-            Boolean indicating whether to save checkpoint
-            
-        Compares current validation metrics against best seen so far using primary_metric,
-        applies save_best_only logic and min_delta threshold, ensures consistent decisions
-        across all processes in distributed setting, and returns checkpoint decision that
-        is synchronized across all ranks.
-        """
-        raise NotImplementedError("Checkpoint decision not implemented yet.")
-    
+    def _tick_early_stopping(self, current_metric: float) -> None:
+        """Conduct logic to update early stopping ticker and determine if we should stop."""
+        self.log_info(f"Early stopping check dry run")
+        return False
+
     def _save_checkpoint(
         self, 
-        val_metrics: Dict[str, float], 
         is_best: bool = False
     ) -> None:
         """
@@ -843,8 +916,50 @@ class MetalSiteTrainer:
         checkpoint rotation according to max_checkpoints, saves additional best checkpoint
         if is_best is True, and includes metadata for resuming training.
         """
-        raise NotImplementedError("Checkpoint saving not implemented yet.")
-    
+        # first actually save it
+        checkpoint_dir = self.training_config.checkpoint_dir
+        checkpoint_path = checkpoint_dir / f"checkpoint_{self.global_step}"
+        self.accelerator.save_state(checkpoint_path)
+        self.log_info(f"Saved checkpoint at step {self.global_step} to {checkpoint_path}")
+
+        # now if best, copy the checkpoint dir to 'best_checkpoint'
+        if is_best:
+            current_best_checkpoint_path = checkpoint_dir / f"best_checkpoint_{self.global_step}"
+            self.accelerator.save_state(current_best_checkpoint_path)
+            self.log_info(f"Saved **NEW BEST** checkpoint at step {self.global_step} to {current_best_checkpoint_path}")
+        else:
+            current_best_checkpoint_path = None
+
+        # now remove previous checkpoints if we are over the limit
+        self._cleanup_checkpoints(current_best_checkpoint_path=current_best_checkpoint_path)
+        self.accelerator.wait_for_everyone()
+
+    @main_process_only
+    def _cleanup_checkpoints(self, current_best_checkpoint_path: Optional[Path] = None) -> None:
+        """
+        Remove old checkpoints beyond the maximum allowed.
+        """
+        checkpoint_dir = self.training_config.checkpoint_dir
+        # first delete the previous best checkpoint if specified
+        if current_best_checkpoint_path is not None:
+            checkpoints_with_best_tag = list(checkpoint_dir.glob("best_checkpoint_*"))
+            for d in checkpoints_with_best_tag:
+                # not the current one
+                if d != current_best_checkpoint_path:
+                    self.log_info(f"Removing old best checkpoint: {d}")
+                    shutil.rmtree(d)
+
+        # make sure not to look at the "best" checkpoint
+        checkpoint_folders = sorted([d for d in checkpoint_dir.iterdir() if d.is_dir() and d.name.startswith("checkpoint_")])
+
+        if len(checkpoint_folders) > self.training_config.max_checkpoints:
+            checkpoint_steps = [int(d.name.split("_")[-1]) for d in checkpoint_folders]
+            steps_to_remove = sorted(checkpoint_steps)[:len(checkpoint_steps) - self.training_config.max_checkpoints]
+            for d in checkpoint_folders:
+                if int(d.name.split("_")[-1]) in steps_to_remove:
+                    self.log_info(f"Removing old checkpoint: {d}")
+                    shutil.rmtree(d)
+
     def _should_early_stop(
         self, 
         val_metrics: Dict[str, float]
@@ -887,13 +1002,50 @@ class MetalSiteTrainer:
 
         log_msg = f"Step {self.global_step}: " + ", ".join([f"{prefix}{k}={v:.4f}" for k, v in metrics.items()])
         self.log_info(log_msg)
-    
-    def _cleanup(self) -> None:
+
+    @property
+    def best_checkpoint_path_on_file(self):
+        checkpoint_dir = self.training_config.checkpoint_dir
+        best_list = checkpoint_dir.glob("best_checkpoint_*")
+        assert len(best_list) == 1, "Expected exactly one best checkpoint"
+        if best_list:
+            return best_list[0]
+        return None
+
+    def _finalize_training(self) -> None:
         """
-        Cleanup using Accelerate utilities.
+        Finalize training by saving the last checkpoint and cleaning up resources.
+        """
+        # TODO: grab EMA if applicable
+
+        # validate final model and save checkpoint
+        # make sure we catch the edge case where this is the best step we update the best checkpoint
+        eval_metrics = self._validate()
         
-        Uses accelerator.end_training() to properly clean up distributed processes and
-        resources, closes logging handlers, performs final checkpoint save if needed,
-        and handles graceful shutdown of all infrastructure managed by accelerator.
-        """
-        self.log_warning("`_cleanup` dry run called.")
+        # determine if is best
+        if self.training_config.primary_metric is not None:
+            assert self.training_config.primary_metric in eval_metrics, \
+                f"Primary metric {self.training_config.primary_metric} not found in eval metrics"
+            tracked_eval_metric = eval_metrics[self.training_config.primary_metric]
+            is_best = (tracked_eval_metric < self.best_metric) or (self.best_metric is None)
+        else:
+            is_best = False
+
+        # checkpoint
+        self._save_checkpoint(is_best=is_best)
+
+        # exit the training interface
+        self.accelerator.end_training()
+
+        # we need to save a model with save_pretrained - this differs from a checkpoint eg. it is not wrapped
+        # first load the best checkpoint
+        if not is_best:
+            self.log_info(f"Loading best checkpoint from {best_checkpoint_path}")
+            best_checkpoint_path = self.best_checkpoint_path_on_file
+            self._load_checkpoint_if_resuming(checkpoint_path=best_checkpoint_path)
+
+            # TODO: also grab EMA params before the final model save
+
+        # save it - we should be able to call from_pretained on it ...
+        self.log_info(f"Saving final model from step={self.global_step}")
+        self.accelerator.save_model(self.model, Path(self.training_config.output_dir) / "final_model")
