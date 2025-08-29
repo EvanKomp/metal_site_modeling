@@ -251,7 +251,8 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         # Early stopping
         patience=training_params.patience,
         min_delta=training_params.min_delta,
-        
+        early_stopping_sleep_epochs=training_params.early_stopping_sleep_epochs,
+
         # Training resumption
         resume_from_checkpoint=training_params.resume_from_checkpoint,
         reset_optimizer=training_params.reset_optimizer,

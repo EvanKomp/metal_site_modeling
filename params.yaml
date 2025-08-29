@@ -190,8 +190,9 @@ data:
     node_level_metrics: False
     
     # Early Stopping
-    patience: null
-    min_delta: 0.0
+    patience: 2
+    min_delta: 0.0 # largest (most positive) change in tracked eval metric to be considered 
+    early_stopping_sleep_epochs: 0.2
     
     # Training Resumption
     resume_from_checkpoint: null
