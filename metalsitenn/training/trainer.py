@@ -31,6 +31,8 @@ from metalsitenn.nn.model import ModelOutput, EquiformerWEdgesModel
 from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.graph_data import BatchProteinData
 
+from metalsitenn.nn.mlp import MLP
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -321,10 +323,10 @@ class MetalSiteTrainer:
         looks like it is expected to be given POST parallelized model, so call accelerate first
         """
         assert issubclass(self.model_class, EquiformerWEdgesModel), "model_class must be EquiformerWEdgesModel or subclass"
-        self.model = None
+        self.model = self.accelerator.prepare(MLP(5,5))
         self.ema_object = None
 
-        self.log_warning("`_setup_model` dry run called.")
+        self.log_warning("`_setup_model` dry run called with dummy MLP")
     
     def _setup_data_loaders(self) -> None:
         """
@@ -445,9 +447,12 @@ class MetalSiteTrainer:
         if checkpoint_path is None:
             checkpoint_path = self.training_config.resume_from_checkpoint
 
+        if checkpoint_path is None:
+            return
+
         # try to parse the step number from the checkpoint
         # it should follow the form '...checkpoint_<step>'
-        step_num = checkpoint_path.split("checkpoint_")[-1]
+        step_num = str(checkpoint_path).split("checkpoint_")[-1]
         step_num = int(step_num) if step_num.isdigit() else None
         if step_num is None:
             raise ValueError(f"Invalid checkpoint path: {checkpoint_path}, cannot parse global step")
@@ -471,6 +476,9 @@ class MetalSiteTrainer:
         Note that if the batch size or number of devices changes since the loaded checkpoint this data jumping
         is not rigorous anymore. Then begin training at that stage
         """
+        # do an eval at start
+        self._validate()
+
         if self.global_step != 0:
             # get steps per epoch
             steps_per_epoch = len(self.train_loader)
@@ -495,7 +503,7 @@ class MetalSiteTrainer:
             current_epoch = 1
 
         # main loop
-        for epoch in range(current_epoch, self.training_config.num_epochs + 1):
+        for epoch in range(current_epoch, self.training_config.max_epochs + 1):
             try:
                 self._train_epoch(epoch)
             except EarlyStoppingException:
@@ -562,13 +570,16 @@ class MetalSiteTrainer:
 
                     tracked_eval_metric = eval_metrics[self.training_config.primary_metric]
                     # check that it is a single quantity
-                    assert tracked_eval_metric.numel() == 1, "Primary metric must be a single quantity"
+                    try:
+                        tracked_eval_metric = float(tracked_eval_metric)
+                    except (ValueError, TypeError):
+                        raise ValueError(f"Invalid value for primary metric {self.training_config.primary_metric}: {tracked_eval_metric}")
 
                     # tick early stopping
                     should_stop = self._tick_early_stopping(tracked_eval_metric)
 
                     # keep track of the best metric, checkpoint will use this.
-                    if tracked_eval_metric < self.best_metric or self.best_metric is None:
+                    if self.best_metric is None or (tracked_eval_metric < self.best_metric):
                         is_best = True
                         self.best_metric = tracked_eval_metric
                     else:
@@ -585,12 +596,14 @@ class MetalSiteTrainer:
                     # apparently we are too maverick for keeping track of the best or early stopping
                     self._save_checkpoint() 
 
-                
-
                 # take a breath after eval
                 self.accelerator.wait_for_everyone()
 
-        self.log_info(f"Completed epoch {epoch}/{self.training_config.num_epochs}")
+            else:
+                # no eval
+                pass
+
+        self.log_info(f"Completed epoch {epoch}/{self.training_config.max_epochs}")
         return None
     
     def _train_step(
@@ -709,9 +722,10 @@ class MetalSiteTrainer:
         device handling, performs forward passes with accelerator's automatic mixed precision,
         applies custom custom_eval_fn if provided, uses accelerator.gather() to collect results from
         all processes in distributed setting, and returns aggregated validation metrics.
-        NOTE EMA is not controlled inside of this method but in the main loop such that we only have
-        to swap parameters once in and once back out for validation and checkpointing.
         """
+        if self.val_loader is None:
+            return {}
+        
         # set model to eval mode
         # self.model.eval()
         # loop over batches and call evaluate batch (which will use custom eval fn if provided)
@@ -774,13 +788,38 @@ class MetalSiteTrainer:
         applies custom custom_eval_fn if provided during initialization,
         shapes the resulting tensors for distributed gathering.
         """
-        # generate a fake loss based on current step
-        fake_loss = torch.tensor(10.0**(1/(self.global_step**.2)), device=self.accelerator.device)
-        cel_loss = fake_loss * 0.8
+        import math
+        
+        # Create a more realistic loss curve with a Gaussian bump around step 60
+        step = self.global_step
+        
+        # Base decreasing trend (exponential decay)
+        base_loss = 10.0 * math.exp(-step / 100.0)
+        
+        # Gaussian bump centered near the end of training to test checkpoint logic
+        bump_center = len(self.train_loader) * self.training_config.max_epochs * 0.95
+        bump_width = 20.0
+        bump_amplitude = 3.0  # Height of the bump
+        
+        gaussian_bump = bump_amplitude * math.exp(-0.5 * ((step - bump_center) / bump_width) ** 2)
+        
+        # Add some noise for realism
+        noise_amplitude = 0.1
+        noise = noise_amplitude * (torch.rand(1, device=self.accelerator.device).item() - 0.5)
+        
+        # Combine components
+        fake_loss = base_loss + gaussian_bump + noise
+        fake_loss = max(fake_loss, 0.1)  # Ensure loss doesn't go negative or too small
+        
+        fake_loss_tensor = torch.tensor(fake_loss, device=self.accelerator.device)
+        cel_loss = fake_loss_tensor * 0.8
 
         # and some fake logits
-        fake_logits = torch.randn((len(batch.element), self.model_config.feature_vocab_sizes['element']), device=self.accelerator.device)
-        model_outs = ModelOutput(loss=fake_loss, node_logits=fake_logits, node_loss=cel_loss)
+        fake_logits = torch.randn(
+            (len(batch.element), self.model_config.feature_vocab_sizes['element']), 
+            device=self.accelerator.device
+        )
+        model_outs = ModelOutput(loss=fake_loss_tensor, node_logits=fake_logits, node_loss=cel_loss)
 
         metrics = self.custom_eval_fn(batch, model_outs)
 
@@ -917,7 +956,7 @@ class MetalSiteTrainer:
         if is_best is True, and includes metadata for resuming training.
         """
         # first actually save it
-        checkpoint_dir = self.training_config.checkpoint_dir
+        checkpoint_dir = Path(self.training_config.run_dir) / "checkpoints"
         checkpoint_path = checkpoint_dir / f"checkpoint_{self.global_step}"
         self.accelerator.save_state(checkpoint_path)
         self.log_info(f"Saved checkpoint at step {self.global_step} to {checkpoint_path}")
@@ -939,7 +978,7 @@ class MetalSiteTrainer:
         """
         Remove old checkpoints beyond the maximum allowed.
         """
-        checkpoint_dir = self.training_config.checkpoint_dir
+        checkpoint_dir = Path(self.training_config.run_dir) / "checkpoints"
         # first delete the previous best checkpoint if specified
         if current_best_checkpoint_path is not None:
             checkpoints_with_best_tag = list(checkpoint_dir.glob("best_checkpoint_*"))
@@ -1005,9 +1044,9 @@ class MetalSiteTrainer:
 
     @property
     def best_checkpoint_path_on_file(self):
-        checkpoint_dir = self.training_config.checkpoint_dir
-        best_list = checkpoint_dir.glob("best_checkpoint_*")
-        assert len(best_list) == 1, "Expected exactly one best checkpoint"
+        checkpoint_dir = Path(self.training_config.run_dir) / "checkpoints"
+        best_list = list(checkpoint_dir.glob("best_checkpoint_*"))
+        assert len(best_list) <= 1, "Expected at most one best checkpoint"
         if best_list:
             return best_list[0]
         return None
@@ -1040,12 +1079,12 @@ class MetalSiteTrainer:
         # we need to save a model with save_pretrained - this differs from a checkpoint eg. it is not wrapped
         # first load the best checkpoint
         if not is_best:
-            self.log_info(f"Loading best checkpoint from {best_checkpoint_path}")
             best_checkpoint_path = self.best_checkpoint_path_on_file
+            self.log_info(f"Loading best checkpoint from {best_checkpoint_path}")
             self._load_checkpoint_if_resuming(checkpoint_path=best_checkpoint_path)
 
             # TODO: also grab EMA params before the final model save
 
         # save it - we should be able to call from_pretained on it ...
         self.log_info(f"Saving final model from step={self.global_step}")
-        self.accelerator.save_model(self.model, Path(self.training_config.output_dir) / "final_model")
+        self.accelerator.save_model(self.model, Path(self.training_config.run_dir) / "final_model")

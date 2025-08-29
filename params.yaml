@@ -157,9 +157,9 @@ data:
   training:
     # should have 1:1 with TrainingConfig
     max_epochs: 1
-    eval_every: 20
-    log_every: 10
-    max_checkpoints: 5
+    eval_every: 10
+    log_every: 5
+    max_checkpoints: 3
     save_best_only: True # ignored currently
 
     lr_initial: 1e-4
