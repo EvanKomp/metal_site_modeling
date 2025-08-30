@@ -557,7 +557,7 @@ class MetalSiteTrainer:
         to gradient_accumulation_steps, performs optimizer steps, updates scheduler, and logs
         metrics using accelerator's distributed-aware utilities.
         """
-        # self.model.train()
+        self.model.train()
         
         # Progress bar (only on main process)
         if self.accelerator.is_main_process:
@@ -755,7 +755,7 @@ class MetalSiteTrainer:
             return {}
         
         # set model to eval mode
-        # self.model.eval()
+        self.model.eval()
         # loop over batches and call evaluate batch (which will use custom eval fn if provided)
         if self.accelerator.is_main_process:
             pbar = tqdm(
@@ -794,7 +794,7 @@ class MetalSiteTrainer:
         all_metrics = self.custom_eval_log_fn(self, all_metrics)
         
         # convert model back to train mode
-        # self.model.train()
+        self.model.train()
 
         self.accelerator.wait_for_everyone()
         return all_metrics
