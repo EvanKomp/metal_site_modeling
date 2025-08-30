@@ -117,7 +117,8 @@ def custom_eval_logger(trainer, metrics: Dict[str, torch.Tensor]):
 
     # and now we can log the confusion matrix as a sklearn plot with dvc live
     fig = confusion_from_matrix(
-        cm, vocab=tuple(trainer.collator.featurizer.tokenizers['element'].get_vocab().keys())
+        cm, vocab=tuple(trainer.collator.featurizer.tokenizers['element'].get_vocab().keys()),
+        normalize=True
     )
     if trainer.accelerator.is_main_process:
         live = trainer.accelerator.get_tracker("dvclive", unwrap=True)

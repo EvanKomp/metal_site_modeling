@@ -26,12 +26,14 @@ from accelerate import Accelerator
 
 from tqdm import tqdm
 
+from fairchem.core.modules.exponential_moving_average import ExponentialMovingAverage
+
 from metalsitenn.nn.pretrained_config import EquiformerWEdgesConfig
 from metalsitenn.nn.model import ModelOutput, EquiformerWEdgesModel
 from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.graph_data import BatchProteinData
 
-from metalsitenn.nn.mlp import MLP
+from metalsitenn.nn.debug_module_pretraining import SimpleDebugModel
 
 import logging
 logger = logging.getLogger(__name__)
@@ -258,6 +260,8 @@ class MetalSiteTrainer:
         self._setup_model()
         self._setup_data_loaders()
         self._setup_optimizer_and_scheduler()
+        self._accelerate_prepare_model_optimizer_scheduler()
+        self._setup_ema()
         self._setup_logging_and_checkpointing()
         self._load_checkpoint_if_resuming()
 
@@ -327,9 +331,12 @@ class MetalSiteTrainer:
         looks like it is expected to be given POST parallelized model, so call accelerate first
         """
         assert issubclass(self.model_class, EquiformerWEdgesModel), "model_class must be EquiformerWEdgesModel or subclass"
-        self.model = self.accelerator.prepare(MLP(5,5))
-        self.ema_object = None
-
+        self.model = SimpleDebugModel(
+            vocab_size=self.model_config.feature_vocab_sizes['element'],
+            cel_class_weights=torch.Tensor(self.model_config.node_class_weights),
+            label_smoothing=self.model_config.node_class_label_smoothing
+        )
+        
         self.log_warning("`_setup_model` dry run called with dummy MLP")
     
     def _setup_data_loaders(self) -> None:
@@ -413,10 +420,27 @@ class MetalSiteTrainer:
         warmup schedule if specified, and prepares both with accelerator.prepare() which
         handles optimizer state distribution and synchronization in distributed settings.
         """
-        self.optimizer = None
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.training_config.lr_initial)
         self.scheduler = None
 
         self.log_warning("`_setup_optimizer_and_scheduler` dry run called.")
+
+    def _accelerate_prepare_model_optimizer_scheduler(self) -> None:
+        """
+        Prepare model, optimizer, and learning rate scheduler with accelerator.
+        """
+        self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
+        # self.scheduler = self.accelerator.prepare(self.scheduler)
+
+    def _setup_ema(self) -> None:
+        """
+        Setup Exponential Moving Average (EMA) for model parameters.
+        """
+        if self.training_config.ema_decay:
+            self.ema_object = ExponentialMovingAverage(self.model.parameters(), decay=self.training_config.ema_decay)
+            self.accelerator.register_for_checkpointing(self.ema_object)
+        else:
+            self.ema_object = None
 
     def _setup_logging_and_checkpointing(self) -> None:
         """
@@ -630,21 +654,21 @@ class MetalSiteTrainer:
         self.global_step += 1
 
         with self.accelerator.accumulate(self.model):
-            outs = ModelOutput(
-                loss=torch.tensor(0.0, device=self.accelerator.device)
-            )
+            outs = self.model(batch)
 
             # update training related classes
             # check outs for correct format
             assert outs.loss is not None, "ModelOutput must contain loss for training step"
             loss = outs.loss.item()
-            # self.accelerator.backward(outs.loss)
-            # clip?
-            # self.optimizer.step()
+            self.accelerator.backward(outs.loss)
+            # clip
+            self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=self.training_config.clip_grad_norm)
+            self.optimizer.step()
             # self.scheduler.step()
-            # self.optimizer.zero_grad()
-
-        # TODO EMA update if needed
+            self.optimizer.zero_grad()
+            
+        # if self.accelerator.sync_gradients:
+            # TODO EMA update if needed - I don't think having this above will work. Eg. the optimizer knows when to actually step inside the context manager but ema module does not.
 
 
         # log train metrics
@@ -653,7 +677,7 @@ class MetalSiteTrainer:
         # gather metrics across processes using accelerator.gather_for_metrics()
         # if node level values attempt to do a weighted average by num nodes
         train_metrics = {}
-        for name, value in asdict(outs).items():
+        for name, value in outs.__dict__.items():
             if (name.endswith("loss") or name == "loss") and value is not None:
                 value = value.detach().unsqueeze(0)  # Always make [1] tensor
                 train_metrics[f"{name}"] = self.accelerator.gather_for_metrics(value)
@@ -792,41 +816,9 @@ class MetalSiteTrainer:
         applies custom custom_eval_fn if provided during initialization,
         shapes the resulting tensors for distributed gathering.
         """
-        import math
-        
-        # Create a more realistic loss curve with a Gaussian bump around step 60
-        step = self.global_step
-        
-        # Base decreasing trend (exponential decay)
-        base_loss = 10.0 * math.exp(-step / 100.0)
-        
-        # Gaussian bump centered near the end of training to test checkpoint logic
-        bump_center = len(self.train_loader) * self.training_config.max_epochs * 0.95
-        bump_width = 20.0
-        bump_amplitude = 3.0  # Height of the bump
-        
-        gaussian_bump = bump_amplitude * math.exp(-0.5 * ((step - bump_center) / bump_width) ** 2)
-        
-        # Add some noise for realism
-        noise_amplitude = 0.1
-        noise = noise_amplitude * (torch.rand(1, device=self.accelerator.device).item() - 0.5)
-        
-        # Combine components
-        fake_loss = base_loss + gaussian_bump + noise
-        fake_loss = max(fake_loss, 0.1)  # Ensure loss doesn't go negative or too small
-        
-        fake_loss_tensor = torch.tensor(fake_loss, device=self.accelerator.device)
-        cel_loss = fake_loss_tensor * 0.8
-
-        # and some fake logits
-        fake_logits = torch.randn(
-            (len(batch.element), self.model_config.feature_vocab_sizes['element']), 
-            device=self.accelerator.device
-        )
-        model_outs = ModelOutput(loss=fake_loss_tensor, node_logits=fake_logits, node_loss=cel_loss)
+        model_outs = self.model(batch)
 
         metrics = self.custom_eval_fn(batch, model_outs)
-
         return metrics
     
     def _gather_metrics(
@@ -949,6 +941,9 @@ class MetalSiteTrainer:
         if self.global_step < first_step_to_start_tracking:
             return False
         else:
+            if self.best_metric is None:
+                # here, we asked to start doing early stopping already but we have had no evals yet
+                return False
             # alright buddy time to stop slacking
             if (current_metric - self.best_metric) > self.training_config.min_delta:
                 self.evals_no_improve += 1

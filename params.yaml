@@ -140,7 +140,7 @@ data:
     # === TASK-SPECIFIC PARAMETERS ===    
     # NODE CLASSIFICATION
     node_class_weights: true # the config class expects tensor, here put true or false to use weights from 2.1 script
-    node_class_label_smoothing: 0.0
+    node_class_label_smoothing: 0.1
     
     # FILM LOSS
     film_l2_loss_weight: 0.0
@@ -156,8 +156,8 @@ data:
 
   training:
     # should have 1:1 with TrainingConfig
-    max_epochs: 1
-    eval_every: 10
+    max_epochs: 4
+    eval_every: 100
     log_every: 5
     max_checkpoints: 3
     save_best_only: True # ignored currently
