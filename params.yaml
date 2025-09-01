@@ -157,7 +157,7 @@ data:
   training:
     # should have 1:1 with TrainingConfig
     max_epochs: 2
-    eval_every: 80
+    eval_every: null
     log_every: 5
     max_checkpoints: 3
     save_best_only: True # ignored currently
@@ -210,4 +210,6 @@ data:
     # debugging
     track_memory: True
 
-    
+    track_gradients: True
+    gradient_track_patterns: ['embedding', 'mlp.*.weight', 'mlp.*.bias', 'output_proj']
+    gradient_track_flow: False

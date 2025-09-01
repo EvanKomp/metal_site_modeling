@@ -32,7 +32,8 @@ from metalsitenn.nn.pretrained_config import EquiformerWEdgesConfig
 from metalsitenn.nn.model import ModelOutput, EquiformerWEdgesModel
 from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.graph_data import BatchProteinData
-from metalsitenn.nn.mem_tracking import TorchTracemalloc
+from metalsitenn.training.mem_tracking import TorchTracemalloc
+from metalsitenn.training.gradient_tracker import GradientTracker
 
 from metalsitenn.nn.debug_module_pretraining import SimpleDebugModel
 
@@ -103,6 +104,10 @@ class TrainerConfig:
 
     # === DEBUGGING ===
     track_memory: bool = False
+
+    track_gradients: bool = True
+    gradient_track_patterns: Optional[List[str]] = None  # None = all layers, otherwise list of layer names to track
+    gradient_track_flow: bool = True
 
     def __post_init__(self):
         """Validate configuration parameters."""
@@ -267,6 +272,7 @@ class MetalSiteTrainer:
         self._accelerate_prepare_model_optimizer_scheduler()
         self._setup_ema()
         self._setup_logging_and_checkpointing()
+        self._setup_gradient_tracking()
         self._load_checkpoint_if_resuming()
 
     @main_process_only
@@ -467,6 +473,18 @@ class MetalSiteTrainer:
 
         self.log_warning("`_setup_logging_and_checkpointing` dry run called.")
 
+    def _setup_gradient_tracking(self) -> None:
+        """Setup gradient tracking for debugging."""
+        if self.training_config.track_gradients:
+            self.gradient_tracker = GradientTracker(
+                model=self.model,
+                track_patterns=self.training_config.gradient_track_patterns,
+                track_flow=self.training_config.gradient_track_flow,
+            )
+            self.log_info(f"Gradient tracking enabled for {len(self.gradient_tracker.get_tracked_groups())} layers")
+        else:
+            self.gradient_tracker = None
+
     def _load_checkpoint_if_resuming(self, checkpoint_path: str=None) -> None:
         """
         Load checkpoint using Accelerate utilities.
@@ -660,7 +678,7 @@ class MetalSiteTrainer:
     def _train_step(
         self, 
         batch: BatchProteinData, 
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    ) -> None:
         """
         Execute one training step using Accelerate utilities.
         
@@ -684,6 +702,12 @@ class MetalSiteTrainer:
             assert outs.loss is not None, "ModelOutput must contain loss for training step"
             loss = outs.loss.item()
             self.accelerator.backward(outs.loss)
+
+            # get gradient related metrics
+            grad_metrics = {}
+            if self.gradient_tracker is not None:
+                grad_metrics = self.gradient_tracker.compute_metrics()
+
             # clip
             self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=self.training_config.clip_grad_norm)
             self.optimizer.step()
@@ -708,6 +732,10 @@ class MetalSiteTrainer:
         train_metrics['num_nodes'] = self.accelerator.gather_for_metrics(
             torch.tensor([n_nodes], dtype=torch.float, device=self.accelerator.device)
         )
+
+        # gather gradient metrics
+        for grad_metric_name, grad_metric_value in grad_metrics.items():
+            train_metrics[grad_metric_name] = self.accelerator.gather_for_metrics(grad_metric_value)
 
         if self.global_step % self.training_config.log_every == 0:
             agg_train_metrics = self._track_per_step_metrics(train_metrics, final=True)
@@ -1116,7 +1144,7 @@ class MetalSiteTrainer:
             assert self.training_config.primary_metric in eval_metrics, \
                 f"Primary metric {self.training_config.primary_metric} not found in eval metrics"
             tracked_eval_metric = eval_metrics[self.training_config.primary_metric]
-            is_best = (tracked_eval_metric < self.best_metric) or (self.best_metric is None)
+            is_best = (self.best_metric is None) or (tracked_eval_metric < self.best_metric)
         else:
             is_best = False
 

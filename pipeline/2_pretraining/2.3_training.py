@@ -268,7 +268,11 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         run_val_at_start=training_params.run_val_at_start,
 
         # debugging
-        track_memory=training_params.track_memory
+        track_memory=training_params.track_memory,
+
+        track_gradients=training_params.track_gradients,
+        gradient_track_patterns=training_params.gradient_track_patterns,
+        gradient_track_flow=training_params.gradient_track_flow,
     )
     
     return training_config
