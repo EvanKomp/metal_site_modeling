@@ -34,6 +34,7 @@ from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.graph_data import BatchProteinData
 from metalsitenn.training.mem_tracking import TorchTracemalloc
 from metalsitenn.training.gradient_tracker import GradientTracker
+from metalsitenn.training.lr_scheduler_factory import create_scheduler
 
 from metalsitenn.nn.debug_module_pretraining import SimpleDebugModel
 
@@ -430,8 +431,28 @@ class MetalSiteTrainer:
         warmup schedule if specified, and prepares both with accelerator.prepare() which
         handles optimizer state distribution and synchronization in distributed settings.
         """
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.training_config.lr_initial)
-        self.scheduler = None
+        lr = self.training_config.lr_initial * self.accelerator.num_processes
+        self.log_info(f"Setting initial learning rate to {lr} (scaled by number of processes)")
+
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
+
+        # now scheduler
+        # first compute post prepared steps per epoch and so warmup steps
+        steps_per_epoch = len(self.train_loader)
+        total_steps = steps_per_epoch * self.training_config.max_epochs
+        warmup_steps = int(steps_per_epoch * self.training_config.warmup_epochs)
+
+        self.scheduler = create_scheduler(
+            optimizer=self.optimizer,
+            scheduler_type=self.training_config.scheduler,
+            total_steps=total_steps,
+            warmup_steps=warmup_steps,
+            warmup_factor=self.training_config.warmup_factor,
+            lr_min_factor=self.training_config.lr_min_factor,
+            decay_epochs=self.training_config.decay_epochs,
+            decay_rate=self.training_config.decay_rate,
+            lambda_type=self.training_config.lambda_type,
+        )
 
         self.log_warning("`_setup_optimizer_and_scheduler` dry run called.")
 
@@ -440,7 +461,7 @@ class MetalSiteTrainer:
         Prepare model, optimizer, and learning rate scheduler with accelerator.
         """
         self.model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
-        # self.scheduler = self.accelerator.prepare(self.scheduler)
+        self.scheduler = self.accelerator.prepare(self.scheduler)
 
     def _setup_ema(self) -> None:
         """
@@ -703,6 +724,9 @@ class MetalSiteTrainer:
             loss = outs.loss.item()
             self.accelerator.backward(outs.loss)
 
+            # also get current learning rate for logging
+            current_lr = self.optimizer.param_groups[0]['lr']
+
             # get gradient related metrics
             grad_metrics = {}
             if self.gradient_tracker is not None:
@@ -711,7 +735,7 @@ class MetalSiteTrainer:
             # clip
             self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=self.training_config.clip_grad_norm)
             self.optimizer.step()
-            # self.scheduler.step()
+            self.scheduler.step()
             self.optimizer.zero_grad()
             
         # if self.accelerator.sync_gradients:
@@ -736,6 +760,11 @@ class MetalSiteTrainer:
         # gather gradient metrics
         for grad_metric_name, grad_metric_value in grad_metrics.items():
             train_metrics[grad_metric_name] = self.accelerator.gather_for_metrics(grad_metric_value)
+
+        # add lr
+        train_metrics['lr'] = self.accelerator.gather_for_metrics(
+            torch.tensor([current_lr], dtype=torch.float, device=self.accelerator.device)
+        )
 
         if self.global_step % self.training_config.log_every == 0:
             agg_train_metrics = self._track_per_step_metrics(train_metrics, final=True)

@@ -165,9 +165,9 @@ data:
     lr_initial: 1e-4
     scheduler: "LambdaLR"
     lambda_type: "cosine"
-    warmup_epochs: 0
-    warmup_factor: 0.2
-    lr_min_factor: 0.01
+    warmup_epochs: 0.5
+    warmup_factor: 0.1
+    lr_min_factor: 0.1
     decay_epochs: null
     decay_rate: 0.1
     
