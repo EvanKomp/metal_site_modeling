@@ -156,8 +156,8 @@ data:
 
   training:
     # should have 1:1 with TrainingConfig
-    max_epochs: 4
-    eval_every: 100
+    max_epochs: 2
+    eval_every: 80
     log_every: 5
     max_checkpoints: 3
     save_best_only: True # ignored currently
@@ -206,5 +206,8 @@ data:
     
     # Advanced Training
     run_val_at_start: True
+
+    # debugging
+    track_memory: True
 
     

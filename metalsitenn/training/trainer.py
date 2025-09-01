@@ -32,6 +32,7 @@ from metalsitenn.nn.pretrained_config import EquiformerWEdgesConfig
 from metalsitenn.nn.model import ModelOutput, EquiformerWEdgesModel
 from metalsitenn.featurizer import MetalSiteCollator
 from metalsitenn.graph_data import BatchProteinData
+from metalsitenn.nn.mem_tracking import TorchTracemalloc
 
 from metalsitenn.nn.debug_module_pretraining import SimpleDebugModel
 
@@ -99,7 +100,10 @@ class TrainerConfig:
     # === PATHS ===
     run_dir: Optional[str] = None
     overwrite_output_dir: bool = False
-    
+
+    # === DEBUGGING ===
+    track_memory: bool = False
+
     def __post_init__(self):
         """Validate configuration parameters."""
         if self.max_epochs <= 0:
@@ -570,8 +574,12 @@ class MetalSiteTrainer:
         else:
             pbar = enumerate(self.train_loader)
         
-        for _, batch in pbar:
+        # start memory tracker
+        mem_tracker = TorchTracemalloc(do_tracking=self.training_config.track_memory, device=self.accelerator.device)
+        mem_tracker.start()
 
+        for _, batch in pbar:
+            
             # take step
             _ = self._train_step(batch)
 
@@ -579,6 +587,18 @@ class MetalSiteTrainer:
             if self._should_eval():
 
                 self.accelerator.wait_for_everyone()
+                # we have gotten to the end of a trainer phase, track mem
+                mem_stats = mem_tracker.stop()
+                if mem_stats is None:
+                    pass
+                else:
+                    # we need to get them from across processes
+                    mem_stats = self.accelerator.gather_for_metrics(mem_stats)
+                    # max them, I think this is probably the best aggregator for this type of tracking
+                    mem_stats = {k: v.max().item() for k, v in mem_stats.items()}
+                    self._log_metrics(mem_stats, prefix="train/memory/")
+                    # validate will handle its own mem tracking
+
                 self.log_debug("Beginning validation ...")
 
                 # TODO: swap in EMA if present
@@ -623,6 +643,9 @@ class MetalSiteTrainer:
                 else:
                     # apparently we are too maverick for keeping track of the best or early stopping
                     self._save_checkpoint() 
+
+                # restart the training tracker in this method
+                mem_tracker.start()
 
                 # take a breath after eval
                 self.accelerator.wait_for_everyone()
@@ -754,6 +777,10 @@ class MetalSiteTrainer:
         if self.val_loader is None:
             return {}
         
+        # start memory tracker
+        mem_tracker = TorchTracemalloc(do_tracking=self.training_config.track_memory, device=self.accelerator.device)
+        mem_tracker.start()
+
         # set model to eval mode
         self.model.eval()
         # loop over batches and call evaluate batch (which will use custom eval fn if provided)
@@ -795,6 +822,15 @@ class MetalSiteTrainer:
         
         # convert model back to train mode
         self.model.train()
+
+        # log memory metrics
+        mem_stats = mem_tracker.stop()
+        if mem_stats is None:
+            pass
+        else:
+            mem_stats = self.accelerator.gather_for_metrics(mem_stats)
+            mem_stats = {k: v.max().item() for k, v in mem_stats.items()}
+            self._log_metrics(mem_stats, prefix="eval/memory/")
 
         self.accelerator.wait_for_everyone()
         return all_metrics

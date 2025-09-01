@@ -182,7 +182,7 @@ def initialize_model_config(params: ParamsObj, collator: MetalSiteCollator) -> E
             if weights_path.exists():
                 with open(weights_path, 'r') as f:
                     weights_data = json.load(f)
-                model_params['node_class_weights'] = weights_data['class_weights']
+                model_params['node_class_weights'] = torch.tensor(weights_data['class_weights'])
                 logging.info(f"Loaded node class weights from {weights_path}")
             else:
                 logging.warning(f"Node class weights file not found: {weights_path}")
@@ -265,7 +265,10 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         shuffle=training_params.shuffle,
         
         # Advanced training
-        run_val_at_start=training_params.run_val_at_start
+        run_val_at_start=training_params.run_val_at_start,
+
+        # debugging
+        track_memory=training_params.track_memory
     )
     
     return training_config
