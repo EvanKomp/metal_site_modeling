@@ -568,10 +568,11 @@ class MetalSiteTrainer:
             current_epoch = (self.global_step // steps_per_epoch) + 1
             # steps taken already in this epoch
             steps_to_skip = self.global_step % steps_per_epoch
+            self.log_info(f"Resuming training from epoch {current_epoch}, step {steps_to_skip}, steps remaining in epoch {steps_per_epoch - steps_to_skip}")
 
             # patch over the dataloader for this first initial epoch
             skipped_train_dataloader = self.accelerator.skip_first_batches(
-                self.train_loader, steps=steps_to_skip
+                self.train_loader, num_batches=steps_to_skip
             )
             self._train_loader = self.train_loader
             self.train_loader = skipped_train_dataloader # self._train_epoch uses this attribute
@@ -581,6 +582,9 @@ class MetalSiteTrainer:
 
             # Now we return you to your scheduled broadcast
             self.train_loader = self._train_loader
+
+            # we just finished that epoch so can tick that
+            current_epoch += 1
         else:
             current_epoch = 1
 

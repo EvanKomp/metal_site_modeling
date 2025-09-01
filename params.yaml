@@ -157,12 +157,12 @@ data:
   training:
     # should have 1:1 with TrainingConfig
     max_epochs: 2
-    eval_every: null
+    eval_every: 50
     log_every: 1
-    max_checkpoints: 3
+    max_checkpoints: 10
     save_best_only: True # ignored currently
 
-    lr_initial: 1.0
+    lr_initial: 1e-4
     scheduler: "LambdaLR"
     lambda_type: "cosine"
     warmup_epochs: 0.5
@@ -175,7 +175,7 @@ data:
     # Optimization & Regularization  
     optimizer: "AdamW"
     batch_size: 32
-    gradient_accumulation_steps: 10
+    gradient_accumulation_steps: 2
     weight_decay: 0.0
     clip_grad_norm: 1.0
     ema_decay: null
@@ -185,7 +185,6 @@ data:
     run_dir: data/2/2.3_pretraining
     overwrite_output_dir: true
 
-    
     # Evaluation
     primary_metric: "loss"
     node_level_metrics: False
@@ -196,7 +195,7 @@ data:
     early_stopping_sleep_epochs: 0.2
     
     # Training Resumption
-    resume_from_checkpoint: null
+    resume_from_checkpoint: './tmp/checkpoints/checkpoint_50'
     reset_optimizer: False
     
     # Data Loading & Sampling
