@@ -67,6 +67,7 @@ class TrainerConfig:
     lr_min_factor: float = 0.01  # Minimum LR factor for cosine annealing
     decay_epochs: Optional[List[int]] = None  # Epochs for multistep decay
     decay_rate: float = 0.1  # Decay factor for multistep
+    period_epochs: float = 0.5
     
     # === OPTIMIZATION & REGULARIZATION ===
     optimizer: str = "AdamW"
@@ -130,9 +131,9 @@ class TrainerConfig:
         if self.max_checkpoints <= 0:
             raise ValueError("max_checkpoints must be positive")
         
-        if self.scheduler == "LambdaLR" and self.lambda_type not in ["cosine", "multistep"]:
-            raise ValueError("lambda_type must be 'cosine' or 'multistep' for LambdaLR")
-        
+        if self.scheduler == "LambdaLR" and self.lambda_type not in ["cosine", "multistep", "multistep_cosine", "warm_restart_cosine"]:
+            raise ValueError("lambda_type must be 'cosine' or 'multistep' or 'multistep_cosine' for LambdaLR")
+
         if self.lambda_type == "multistep" and self.decay_epochs is None:
             raise ValueError("decay_epochs required for multistep scheduler")
 
@@ -302,6 +303,7 @@ class MetalSiteTrainer:
         """
         self.accelerator = Accelerator(
             gradient_accumulation_steps=self.training_config.gradient_accumulation_steps,
+            step_scheduler_with_optimizer=True,
             log_with='dvclive')
         self.accelerator.init_trackers(
             project_name="metal_site_trainer",
@@ -437,10 +439,18 @@ class MetalSiteTrainer:
         self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=lr)
 
         # now scheduler
-        # first compute post prepared steps per epoch and so warmup steps
-        steps_per_epoch = len(self.train_loader)
-        total_steps = steps_per_epoch * self.training_config.max_epochs
-        warmup_steps = int(steps_per_epoch * self.training_config.warmup_epochs)
+        # huggingface will "automagically" (I really dislike this behavior)
+        # do extra steps in the prepared scheduler based on num processes
+        # this means we need to compute with pre-prepared dataset sizes
+        # BUT the scheduler is only stepped with the optimizer, so even if it is doing Nprocess steps
+        # it may be way behind on the schdule if accumulation is being used, 
+        # so we need to reduce the total steps by gradient accumulation steps...
+        steps_per_epoch_raw = len(self.train_loader) * self.accelerator.num_processes
+        steps_per_epoch_with_accumulation = steps_per_epoch_raw // (self.training_config.gradient_accumulation_steps or 1)
+
+        total_steps = steps_per_epoch_with_accumulation * self.training_config.max_epochs
+        warmup_steps = int(steps_per_epoch_with_accumulation * self.training_config.warmup_epochs)
+        period = int(steps_per_epoch_with_accumulation * self.training_config.period_epochs)
 
         self.scheduler = create_scheduler(
             optimizer=self.optimizer,
@@ -452,6 +462,7 @@ class MetalSiteTrainer:
             decay_epochs=self.training_config.decay_epochs,
             decay_rate=self.training_config.decay_rate,
             lambda_type=self.training_config.lambda_type,
+            period=period
         )
 
         self.log_warning("`_setup_optimizer_and_scheduler` dry run called.")

@@ -21,6 +21,7 @@ def create_scheduler(
     decay_epochs: Optional[List[int]] = None,
     decay_rate: float = 0.1,
     lambda_type: str = "cosine",
+    period: int = 100
 ) -> Optional[torch.optim.lr_scheduler._LRScheduler]:
     """
     Create learning rate scheduler from configuration parameters.
@@ -52,6 +53,10 @@ def create_scheduler(
             if decay_epochs is None:
                 raise ValueError("decay_epochs required for multistep lambda scheduler")
             lambda_fn = _create_multistep_lambda(warmup_steps, warmup_factor, decay_epochs, decay_rate, total_steps)
+        elif lambda_type == "multistep_cosine":
+            lambda_fn = _create_multistep_cosine_lambda(total_steps, warmup_steps, warmup_factor, lr_min_factor, period)
+        elif lambda_type == "warm_restart_cosine":
+            lambda_fn = _create_warm_restart_cosine_lambda(total_steps, warmup_steps, warmup_factor, lr_min_factor, period)
         else:
             raise ValueError(f"Unsupported lambda_type: {lambda_type}")
             
@@ -96,26 +101,88 @@ def _create_cosine_lambda(
     return cosine_lambda
 
 
-def _create_multistep_lambda(
+def _create_multistep_cosine_lambda(
+    total_steps: int,
     warmup_steps: int,
-    warmup_factor: float, 
-    decay_epochs: List[int],
-    decay_rate: float,
-    total_steps: int
+    warmup_factor: float,
+    lr_min_factor: float,
+    period: int
 ) -> callable:
-    """Create multistep lambda function with warmup."""
-    # Convert decay epochs to steps (assumes uniform epoch length)
-    steps_per_epoch = total_steps // max(decay_epochs[-1], 1) if decay_epochs else 1
-    decay_steps = [epoch * steps_per_epoch for epoch in decay_epochs]
+    """
+    Create multistep cosine lambda with symmetric sine cycles after warmup.
     
-    def multistep_lambda(step: int) -> float:
+    After warmup, creates symmetric sine curves that start at 1.0, go down to 
+    lr_min_factor at period/2, then back up to 1.0 at period. Each cycle is 
+    continuous with no jumps.
+    
+    Args:
+        total_steps: Total training steps
+        warmup_steps: Number of warmup steps
+        warmup_factor: Starting factor for warmup phase
+        lr_min_factor: Minimum LR factor for sine cycles
+        period: Steps per complete sine cycle (down and back up)
+        
+    Returns:
+        Lambda function for LambdaLR scheduler
+    """
+    def multistep_cosine_lambda(step: int) -> float:
         if step < warmup_steps:
             # Linear warmup
             alpha = step / max(warmup_steps, 1)
             return warmup_factor + (1.0 - warmup_factor) * alpha
         else:
-            # Multistep decay
-            decay_count = sum(1 for decay_step in decay_steps if step >= decay_step)
-            return decay_rate ** decay_count
+            # Symmetric sine cycles: starts at 1.0, goes to lr_min_factor, back to 1.0
+            steps_since_warmup = step - warmup_steps
+            cycle_progress = (steps_since_warmup % period) / max(period, 1)
+            cycle_progress = min(cycle_progress, 1.0)
+            
+            # Use cosine to create symmetric curve: cos(0)=1, cos(π)=-1, cos(π/2)=0
+            # Map to desired range: 1.0 at start/end, lr_min_factor at middle
+            cosine_value = math.cos(2 * math.pi * cycle_progress)
+            # Remap from [-1,1] to [lr_min_factor, 1.0]
+            return lr_min_factor + 0.5 * (1.0 - lr_min_factor) * (1.0 + cosine_value)
     
-    return multistep_lambda
+    return multistep_cosine_lambda
+
+def _create_warm_restart_cosine_lambda(
+    total_steps: int,
+    warmup_steps: int,
+    warmup_factor: float,
+    lr_min_factor: float,
+    period: int
+) -> callable:
+    """
+    Create warm restart cosine lambda with periodic restarts after warmup.
+    
+    After warmup, each period starts at 1.0 and decays via cosine to lr_min_factor,
+    then jumps back to 1.0 for the next period. Classic cosine annealing with
+    warm restarts (SGDR) pattern.
+    
+    Args:
+        total_steps: Total training steps
+        warmup_steps: Number of warmup steps
+        warmup_factor: Starting factor for warmup phase
+        lr_min_factor: Minimum LR factor for cosine decay
+        period: Steps per cosine decay cycle
+        
+    Returns:
+        Lambda function for LambdaLR scheduler
+    """
+    def warm_restart_cosine_lambda(step: int) -> float:
+        if step < warmup_steps:
+            # Linear warmup
+            alpha = step / max(warmup_steps, 1)
+            return warmup_factor + (1.0 - warmup_factor) * alpha
+        else:
+            # Cosine annealing with warm restarts
+            steps_since_warmup = step - warmup_steps
+            cycle_progress = (steps_since_warmup % period) / max(period, 1)
+            cycle_progress = min(cycle_progress, 1.0)
+            
+            # Standard cosine decay: cos(0)=1 → cos(π)=-1
+            # Maps to: 1.0 at start → lr_min_factor at end of period
+            return lr_min_factor + 0.5 * (1.0 - lr_min_factor) * (
+                1.0 + math.cos(math.pi * cycle_progress)
+            )
+ 
+    return warm_restart_cosine_lambda

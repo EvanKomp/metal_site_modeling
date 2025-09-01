@@ -232,6 +232,7 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         lr_min_factor=training_params.lr_min_factor,
         decay_epochs=training_params.decay_epochs,
         decay_rate=training_params.decay_rate,
+        period_epochs=training_params.period_epochs,
         
         # Optimization & regularization
         optimizer=training_params.optimizer,

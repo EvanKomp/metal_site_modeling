@@ -158,11 +158,11 @@ data:
     # should have 1:1 with TrainingConfig
     max_epochs: 2
     eval_every: null
-    log_every: 5
+    log_every: 1
     max_checkpoints: 3
     save_best_only: True # ignored currently
 
-    lr_initial: 1e-4
+    lr_initial: 1.0
     scheduler: "LambdaLR"
     lambda_type: "cosine"
     warmup_epochs: 0.5
@@ -170,11 +170,12 @@ data:
     lr_min_factor: 0.1
     decay_epochs: null
     decay_rate: 0.1
+    period_epochs: 0.5
     
     # Optimization & Regularization  
     optimizer: "AdamW"
     batch_size: 32
-    gradient_accumulation_steps: 1
+    gradient_accumulation_steps: 10
     weight_decay: 0.0
     clip_grad_norm: 1.0
     ema_decay: null
@@ -208,8 +209,8 @@ data:
     run_val_at_start: True
 
     # debugging
-    track_memory: True
+    track_memory: False
 
-    track_gradients: True
+    track_gradients: False
     gradient_track_patterns: ['embedding', 'mlp.*.weight', 'mlp.*.bias', 'output_proj']
     gradient_track_flow: False
