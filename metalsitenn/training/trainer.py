@@ -500,10 +500,7 @@ class MetalSiteTrainer:
         self.best_step = None
         self.evals_no_improve = 0
         self._metrics_cache = {}
-        # TODO: register anything for checkpointing needed, eg. EMA and learning rate scheduler
-        # thinks like model and optimizer are already handled when we accelerator prepare them.
 
-        self.log_warning("`_setup_logging_and_checkpointing` dry run called.")
 
     def _setup_gradient_tracking(self) -> None:
         """Setup gradient tracking for debugging."""
@@ -655,15 +652,23 @@ class MetalSiteTrainer:
 
                 self.log_debug("Beginning validation ...")
 
-                # TODO: swap in EMA if present
+                # swap out ema for eval if present
+                if self.ema_object is not None:
+                    self.log_info("Swapping to EMA for evaluation")
+                    self.ema_object.store() # stores the current instantaneous params
+                    self.ema_object.copy_to() # and replaces with the EMA
 
                 eval_metrics = self._validate()
                 self.log_info(f"Eval metrics at step {self.global_step}: {eval_metrics}")
 
-                # TODO swap back in instananeous params from EMA
+                # swap back in instananeous params from EMA
+                if self.ema_object is not None:
+                    self.log_info("Restoring model params post EMA evaluation")
+                    self.ema_object.restore() # restores the instantaneous params back to the model
+
                 # we do not want ema params for checkpointing during training,
                 # the ema itself is checkpointed. The only time we want to save the model with
-                # the ema params is maybe the final save of the unsharder PretrainedModel
+                # the ema params is maybe the final save of the unsharded PretrainedModel
 
                 # do some checks for tracking best checkpoint and early stopping
                 if self.training_config.primary_metric is not None:
@@ -752,9 +757,12 @@ class MetalSiteTrainer:
             self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
-            
-        # if self.accelerator.sync_gradients:
-            # TODO EMA update if needed - I don't think having this above will work. Eg. the optimizer knows when to actually step inside the context manager but ema module does not.
+        
+        # update the ema params on a grad update
+        # ego only when we actually update params
+        if self.ema_object is not None:
+            if self.accelerator.sync_gradients:
+                self.ema_object.update()
 
 
         # log train metrics
@@ -1177,7 +1185,10 @@ class MetalSiteTrainer:
         """
         Finalize training by saving the last checkpoint and cleaning up resources.
         """
-        # TODO: grab EMA if applicable
+        if self.ema_object is not None:
+            self.log_info("Swapping to EMA for final model eval and save")
+            self.ema_object.store()
+            self.ema_object.copy_to()
 
         # validate final model and save checkpoint
         # make sure we catch the edge case where this is the best step we update the best checkpoint
@@ -1192,6 +1203,10 @@ class MetalSiteTrainer:
         else:
             is_best = False
 
+        # we need to get the instantanious params back for just a sec for checkpointing
+        if self.ema_object is not None:
+            self.ema_object.restore()
+
         # checkpoint
         self._save_checkpoint(is_best=is_best)
 
@@ -1205,7 +1220,9 @@ class MetalSiteTrainer:
             self.log_info(f"Loading best checkpoint from {best_checkpoint_path}")
             self._load_checkpoint_if_resuming(checkpoint_path=best_checkpoint_path)
 
-            # TODO: also grab EMA params before the final model save
+        # now we can get the EMA params back for final model save of the best checkpoint
+        if self.ema_object is not None:
+            self.ema_object.restore()
 
         # save it - we should be able to call from_pretained on it ...
         self.log_info(f"Saving final model from step={self.global_step}")

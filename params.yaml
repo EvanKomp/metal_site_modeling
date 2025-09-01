@@ -159,10 +159,10 @@ data:
     max_epochs: 2
     eval_every: 50
     log_every: 1
-    max_checkpoints: 10
+    max_checkpoints: 3
     save_best_only: True # ignored currently
 
-    lr_initial: 1e-4
+    lr_initial: 1e-3
     scheduler: "LambdaLR"
     lambda_type: "cosine"
     warmup_epochs: 0.5
@@ -175,10 +175,10 @@ data:
     # Optimization & Regularization  
     optimizer: "AdamW"
     batch_size: 32
-    gradient_accumulation_steps: 2
+    gradient_accumulation_steps: 1
     weight_decay: 0.0
     clip_grad_norm: 1.0
-    ema_decay: null
+    ema_decay: 0.99
     
     # Reproducibility & Directories
     seed: null
@@ -195,7 +195,7 @@ data:
     early_stopping_sleep_epochs: 0.2
     
     # Training Resumption
-    resume_from_checkpoint: './tmp/checkpoints/checkpoint_50'
+    resume_from_checkpoint: null
     reset_optimizer: False
     
     # Data Loading & Sampling
