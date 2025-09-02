@@ -5,7 +5,8 @@
 * Company: National Renewable Energy Lab, Bioeneergy Science and Technology
 * License: MIT
 '''
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union,  OrderedDict, Set
+from collections import OrderedDict
 from functools import partial
 from transformers.modeling_utils import PreTrainedModel
 import torch
@@ -18,6 +19,7 @@ from .pretrained_config import EquiformerWEdgesConfig
 from .heads.node_prediction import NodePredictionHead
 
 from ..graph_data import BatchProteinData, ModelOutput
+
 
 
 
@@ -55,6 +57,71 @@ class EquiformerWEdgesPretrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize weights for PreTrainedModel framework compatibility."""
         eqv2_init_weights(module, weight_init=self.config.weight_init)
+
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """
+        Override state_dict to handle shared tensors and ensure contiguity.
+        
+        Creates independent copies of shared tensors for serialization,
+        ensures all tensors are contiguous, while preserving the original 
+        sharing relationships in memory.
+        
+        Returns:
+            OrderedDict containing serializable state dict with unshared, contiguous tensors
+        """
+        # Get the original state dict
+        original_state_dict = super().state_dict(destination, prefix, keep_vars)
+        
+        # Find tensors that share memory
+        shared_groups = self._find_shared_tensor_groups(original_state_dict)
+        
+        # Create unshared state dict for serialization
+        unshared_state_dict = OrderedDict()
+        processed_ptrs = set()
+        
+        for name, tensor in original_state_dict.items():
+            if isinstance(tensor, torch.Tensor):
+                ptr = tensor.data_ptr()
+                
+                if ptr in shared_groups and ptr not in processed_ptrs:
+                    # First occurrence of this shared tensor - use original but make contiguous
+                    result_tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
+                    unshared_state_dict[name] = result_tensor
+                    processed_ptrs.add(ptr)
+                elif ptr in shared_groups:
+                    # Subsequent occurrence - create independent contiguous copy
+                    unshared_state_dict[name] = tensor.clone().contiguous()
+                else:
+                    # Not shared - ensure contiguous
+                    unshared_state_dict[name] = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            else:
+                # Non-tensor objects
+                unshared_state_dict[name] = tensor
+        
+        return unshared_state_dict
+    
+    def _find_shared_tensor_groups(self, state_dict: Dict[str, torch.Tensor]) -> Dict[int, Set[str]]:
+        """
+        Find groups of parameters that share memory.
+        
+        Args:
+            state_dict: Model state dictionary
+            
+        Returns:
+            Dict mapping memory_ptr -> set of parameter names sharing that memory
+        """
+        ptr_to_names = {}
+        
+        for name, tensor in state_dict.items():
+            ptr = tensor.data_ptr()
+            if ptr not in ptr_to_names:
+                ptr_to_names[ptr] = set()
+            ptr_to_names[ptr].add(name)
+        
+        # Return only groups with multiple members (shared tensors)
+        return {ptr: names for ptr, names in ptr_to_names.items() if len(names) > 1}
+        
 
 
 

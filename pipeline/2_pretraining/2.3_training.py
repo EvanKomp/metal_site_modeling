@@ -76,7 +76,7 @@ def initialize_model_config(params: ParamsObj, collator: MetalSiteCollator) -> E
             if weights_path.exists():
                 with open(weights_path, 'r') as f:
                     weights_data = json.load(f)
-                model_params['node_class_weights'] = torch.tensor(weights_data['class_weights'])
+                model_params['node_class_weights'] = weights_data['class_weights']
                 logging.info(f"Loaded node class weights from {weights_path}")
             else:
                 logging.warning(f"Node class weights file not found: {weights_path}")

@@ -20,7 +20,7 @@ data:
 2_pretraining:
   # related to data filtering and processing
   data:
-    debug_max_sites: 1000
+    debug_max_sites: 5000
     # filtering 1:1 with MetalSiteDataset filtering
     filtering:
       valid_metals: null
@@ -156,7 +156,7 @@ data:
 
   training:
     # should have 1:1 with TrainingConfig
-    max_epochs: 1
+    max_epochs: 2
     eval_every: 50
     log_every: 1
     max_checkpoints: 3

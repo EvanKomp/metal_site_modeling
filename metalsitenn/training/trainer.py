@@ -1228,4 +1228,9 @@ class MetalSiteTrainer:
 
         # save it - we should be able to call from_pretained on it ...
         self.log_info(f"Saving final model from step={self.global_step}")
-        self.accelerator.save_model(self.model, Path(self.training_config.run_dir) / "final_model")
+        # self.accelerator.save_model(self.model, Path(self.training_config.run_dir) / "final_model")
+
+        # the above is not saving the pretrained config so lets unwrap and try that
+        if self.accelerator.is_main_process:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            unwrapped_model.save_pretrained(Path(self.training_config.run_dir) / "final_model")
