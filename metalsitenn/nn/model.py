@@ -185,7 +185,7 @@ class EquiformerWEdgesForPretraining(EquiformerWEdgesModel):
     def forward(
         self,
         batch: BatchProteinData,
-        compute_loss: bool = False,
+        compute_loss: bool = True,
         return_per_node_cel_loss: bool = False,
         return_node_embedding_tensor: bool = False,
         **kwargs

@@ -134,6 +134,110 @@ def ParsePDBLigand(cifname : str) -> Dict:
 
     return out
 
+def _group_by_distance_fast(atoms, threshold=0.1):
+    """Fast O(n log n) grouping for small threshold values."""
+    
+    # Sort by x-coordinate for early termination
+    sorted_atoms = sorted(enumerate(atoms), key=lambda x: x[1].xyz[0])
+    
+    groups = []
+    used = set()
+    
+    for i, (orig_idx, atom) in enumerate(sorted_atoms):
+        if orig_idx in used:
+            continue
+            
+        group = [atom]
+        used.add(orig_idx)
+        
+        # Only check atoms with similar x-coordinates
+        for j in range(i + 1, len(sorted_atoms)):
+            other_orig_idx, other_atom = sorted_atoms[j]
+            
+            # Early termination - x difference too large
+            if other_atom.xyz[0] - atom.xyz[0] > threshold:
+                break
+                
+            if other_orig_idx not in used:
+                dist = np.linalg.norm(np.array(atom.xyz) - np.array(other_atom.xyz))
+                if dist <= threshold:
+                    group.append(other_atom)
+                    used.add(other_orig_idx)
+        
+        groups.append(group)
+    
+    return groups
+
+def handle_overlapping_atoms(nearby_atoms_dict, nearby_residues_dict, distance_threshold=0.5):
+    """
+    Handle overlapping atoms with partial occupancy and update bonds accordingly.
+    
+    Args:
+        nearby_atoms_dict: Dict of atom_key -> atom
+        nearby_residues_dict: Dict of res_key -> list of atom_keys
+        distance_threshold: Spatial overlap threshold (Å)
+        
+    Returns:
+        Tuple of (cleaned_nearby_atoms_dict, cleaned_nearby_residues_dict)
+        Returns None if overlap resolution fails (indicates site should be skipped)
+    """
+    
+    try:
+        # Group spatially overlapping atoms
+        atoms_list = list(nearby_atoms_dict.values())
+        atom_keys_list = list(nearby_atoms_dict.keys())
+        
+        spatial_groups = _group_by_distance_fast(atoms_list, distance_threshold)
+        
+        # Resolve overlaps and track which atoms were kept/removed
+        kept_atoms = {}  # atom_key -> atom
+        removed_atom_keys = set()
+        
+        for group in spatial_groups:
+            if len(group) == 1:
+                # Single atom - find its key and keep it
+                atom = group[0]
+                for key, orig_atom in nearby_atoms_dict.items():
+                    if orig_atom is atom:
+                        kept_atoms[key] = atom
+                        break
+            else:
+                logger.debug(f"Found overlapping atoms: {group}")
+                # Multiple overlapping atoms - resolve and track removed ones
+                resolved_atom = _resolve_overlap(group)
+                
+                # Find keys for all atoms in group
+                group_keys = []
+                for atom in group:
+                    for key, orig_atom in nearby_atoms_dict.items():
+                        if orig_atom is atom:
+                            group_keys.append(key)
+                            break
+                
+                # Keep only the resolved atom
+                for key, atom in zip(group_keys, group):
+                    if atom is resolved_atom:
+                        kept_atoms[key] = atom
+                    else:
+                        removed_atom_keys.add(key)
+        
+        # Update nearby_residues to remove eliminated atoms
+        cleaned_nearby_residues = {}
+        for res_key, atom_keys in nearby_residues_dict.items():
+            remaining_keys = [ak for ak in atom_keys if ak not in removed_atom_keys]
+            if remaining_keys:  # Only keep residues with remaining atoms
+                cleaned_nearby_residues[res_key] = remaining_keys
+        
+        return kept_atoms, cleaned_nearby_residues
+        
+    except Exception as e:
+        logger.warning(f"Overlap handling failed: {e}")
+        return None, None
+
+def _resolve_overlap(overlapping_atoms):
+    """Resolve overlapping atoms based on crystallographic conventions."""
+    # highest occupancy
+    return max(overlapping_atoms, key=lambda x: x.occ)
 
 # ============================================================
 class CIFParser:
@@ -1347,7 +1451,24 @@ class CIFParser:
         if not nearby_residues:
             return None
         
-        # NEW: Calculate coordinating residues (within coordination_distance)
+        # OVERLAP HANDLING: Clean overlapping atoms FIRST before all other processing
+        cleaned_nearby_atoms, cleaned_nearby_residues = handle_overlapping_atoms(
+            nearby_atoms, nearby_residues, distance_threshold=0.5
+        )
+        
+        # If overlap handling failed, skip this site
+        if cleaned_nearby_atoms is None:
+            return None
+        
+        # Check if we still have sufficient atoms after cleaning
+        if not cleaned_nearby_atoms:
+            return None
+        
+        # Update with cleaned data
+        nearby_atoms = cleaned_nearby_atoms
+        nearby_residues = cleaned_nearby_residues
+        
+        # Calculate coordinating residues (within coordination_distance) - after overlap removal
         coordinating_residues = set()
         
         for res_key, atom_list in nearby_residues.items():
@@ -1365,7 +1486,7 @@ class CIFParser:
                             coordinating_residues.add(res_key)
                             break  # Found at least one coordinating atom in this residue
         
-        # Apply atom limit if specified
+        # Apply atom limit if specified - after overlap removal
         if max_atoms is not None and len(nearby_atoms) > max_atoms:
             nearby_atoms, nearby_residues = self._apply_atom_limit(
                 nearby_residues, nearby_atoms, max_atoms, metal_cluster, chains
@@ -1393,10 +1514,14 @@ class CIFParser:
         site_chain, old_to_new_resid = self._create_site_chain(
             metal_cluster, nearby_residues, nearby_atoms, chains, backbone_treatment
         )
-
-        # remove bonds, and other attributes of metals that are clearly wrong.
+        
+        if not site_chain:
+            return None
+        
+        # Clean metal bonding patterns
         site_chain = self.clean_metal_bonding_patterns(site_chain)
-
+        
+        # Map coordinating residues to new residue IDs
         coordinating_residues_new = []
         for res_key in coordinating_residues:
             if res_key in old_to_new_resid:

@@ -9,7 +9,7 @@ data:
   skip_sites_with_entities:  null # list of entitiy names or 'non_metal', in which case if a site contains an antity that does not have a metal, it is skipped (other than water)
   backbone_treatment: free # one of 'ca_only', 'free', 'bound'. For ca_only, Cb , O, N are removed. for free, just the bond is broken. For bound, the bond and all atoms are kept.
   metal_aggregation_distance: 4 # Distance in Angstroms to aggregate metals into a single site
-  metal_site_radius: 6 # Radius in Angstroms from metal to include entities in metal binding site
+  metal_site_radius: 10 # Radius in Angstroms from metal to include entities in metal binding site
   max_atoms_per_site: 400 # Maximum number of heavy atoms to consider in a system
   coordination_distance: 2.9 # Distance in Angstroms to consider an atom as coordinating a metal
   min_coordinating_residues_per_site: 3 # Minimum number of residues coordinating the metal to consider a site valid
@@ -76,13 +76,13 @@ data:
     # should have 1:1 with EquiformerWEdgesConfig
     
     # === CORE ARCHITECTURE ===
-    num_layers: 12
-    sphere_channels: 128
-    attn_hidden_channels: 64
-    num_heads: 8
-    attn_alpha_channels: 64
-    attn_value_channels: 16
-    ffn_hidden_channels: 128
+    num_layers: 4 # 12
+    sphere_channels: 24 # 128
+    attn_hidden_channels: 6 # 64
+    num_heads: 4 # 8
+    attn_alpha_channels: 12 # 64
+    attn_value_channels: 12 # 16
+    ffn_hidden_channels: 24 # 128
     norm_type: "layer_norm_sh"
     lmax_list: [3]
     mmax_list: null
@@ -100,7 +100,7 @@ data:
     # bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
     embedding_dim: 32
     edge_degree_projector_hidden_layers: 2
-    edge_degree_projector_size: 128
+    edge_degree_projector_size: 32
     edge_channels_list: null
     
     # === ATTENTION MECHANISMS ===
@@ -116,8 +116,8 @@ data:
     use_sep_s2_act: True
     
     # === REGULARIZATION ===
-    alpha_drop: 0.1
-    drop_path_rate: 0.1
+    alpha_drop: 0.0
+    drop_path_rate: 0.0
     proj_drop: 0.0
     weight_init: "uniform"
     

@@ -17,8 +17,11 @@ from metalsitenn.constants import I2E, RESNAME_3LETTER
 
 from metalsitenn.graph_data import ProteinData, BatchProteinData, make_top_k_graph
 
-DEFAULT_FLOAT = torch.float32
-DEFAULT_INT = torch.int32
+DEFAULT_FLOAT = torch.float
+DEFAULT_INT = torch.long
+
+import logging
+logger = logging.getLogger(__name__)
 
 class MetalSiteFeaturizer:
     """
@@ -1025,6 +1028,20 @@ class MetalSiteFeaturizer:
                 )
             # Append the featurized ProteinData object to the list
             featurized_data.append(features)
+
+        # TODO: temporary fix for systems that have overlapping atoms
+        # fix this in parsing ideally
+        # this is super hacky because a batch of size N might be reduced so batch sizes
+        # will be even more variable
+        new_features = []
+        for features in featurized_data:
+            # hack is to just check any distances for say < 0.3 A
+            if any(features.distances < 0.3):
+                logger.warning(f"Featurizer detected atoms that are too close together in PDB {features.pdb_id} (<0.3 A). Skipping this example.")
+                continue
+            else:
+                new_features.append(features)
+        featurized_data = new_features
 
         # convert to BatchProteinData
         batch_data = featurized_data

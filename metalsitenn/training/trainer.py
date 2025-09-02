@@ -344,14 +344,19 @@ class MetalSiteTrainer:
         looks like it is expected to be given POST parallelized model, so call accelerate first
         """
         assert issubclass(self.model_class, EquiformerWEdgesModel), "model_class must be EquiformerWEdgesModel or subclass"
-        self.model = SimpleDebugModel(
-            vocab_size=self.model_config.feature_vocab_sizes['element'],
-            cel_class_weights=torch.Tensor(self.model_config.node_class_weights),
-            label_smoothing=self.model_config.node_class_label_smoothing
-        )
-        
-        self.log_warning("`_setup_model` dry run called with dummy MLP")
-    
+        # self.model = SimpleDebugModel(
+        #     vocab_size=self.model_config.feature_vocab_sizes['element'],
+        #     cel_class_weights=torch.Tensor(self.model_config.node_class_weights),
+        #     label_smoothing=self.model_config.node_class_label_smoothing
+        # )
+        self.model = self.model_class(self.model_config)
+
+        num_trainable_params = 0
+        for param in self.model.parameters():
+            if param.requires_grad:
+                num_trainable_params += param.numel()
+        self.log_info(f"Model initialized with {num_trainable_params} trainable parameters.")
+
     def _setup_data_loaders(self) -> None:
         """
         Create and prepare PyTorch DataLoaders.
@@ -465,7 +470,6 @@ class MetalSiteTrainer:
             period=period
         )
 
-        self.log_warning("`_setup_optimizer_and_scheduler` dry run called.")
 
     def _accelerate_prepare_model_optimizer_scheduler(self) -> None:
         """
@@ -543,8 +547,6 @@ class MetalSiteTrainer:
 
         # actually load the checkpoint
         self.accelerator.load_state(checkpoint_path)
-
-        self.log_warning(f"`_load_checkpoint_if_resuming` dry run called targeting {checkpoint_path}")
 
     def run(self) -> None:
         """
