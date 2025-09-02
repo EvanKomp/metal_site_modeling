@@ -25,7 +25,7 @@ class EquiformerWEdgesPretrainedModel(PreTrainedModel):
     """
     EquiformerWEdges backbone model wrapped into PretrainedModel.
     """
-    config_class: EquiformerWEdgesConfig
+    config_class = EquiformerWEdgesConfig
     base_model_prefix = "eqwedges"
 
     def __init__(self, config: EquiformerWEdgesConfig):

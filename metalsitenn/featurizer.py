@@ -1035,9 +1035,9 @@ class MetalSiteFeaturizer:
         # will be even more variable
         new_features = []
         for features in featurized_data:
-            # hack is to just check any distances for say < 0.3 A
-            if any(features.distances < 0.3):
-                logger.warning(f"Featurizer detected atoms that are too close together in PDB {features.pdb_id} (<0.3 A). Skipping this example.")
+            # hack is to just check any distances for say < 0.6 A
+            if any(features.distances < 0.6):
+                logger.warning(f"Featurizer detected atoms that are too close together in PDB {features.pdb_id} (<0.6 A). Skipping this example.")
                 continue
             else:
                 new_features.append(features)
