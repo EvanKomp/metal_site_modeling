@@ -333,11 +333,12 @@ class EdgeProjector(nn.Module):
 
         # node features
         if self.use_node_features:
-            nodes_embedded = self.source_embedding(feature_dict)
+            nodes_embedded_src = self.source_embedding(feature_dict)
+            nodes_embedded_dst = self.destination_embedding(feature_dict)
 
             # Extract the source and destination node embeddings
-            src_embeddings = nodes_embedded[edge_index[:, 0]]
-            dst_embeddings = nodes_embedded[edge_index[:, 1]]
+            src_embeddings = nodes_embedded_src[edge_index[:, 0]]
+            dst_embeddings = nodes_embedded_dst[edge_index[:, 1]]
             # Concatenate source and destination node embeddings
             to_concat.append(src_embeddings)
             to_concat.append(dst_embeddings)

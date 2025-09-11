@@ -20,7 +20,7 @@ data:
 2_pretraining:
   # related to data filtering and processing
   data:
-    debug_max_sites: 5000
+    debug_max_sites: null
     # filtering 1:1 with MetalSiteDataset filtering
     filtering:
       valid_metals: null
@@ -67,7 +67,7 @@ data:
       active_aggregators: ['unknown_metal']
 
     loss_weighting:
-      cel_count_to_weight_temperature: 2.0
+      cel_count_to_weight_temperature: 1.5
       cel_count_to_weight_clip_token: '<METAL>' # clip upweighting of any rarer tokens than this by this weight
 
     dataloader_n_processes: 8 # number of processes to use for data loading NOTE: Not used for training this is for getting dataset stats
@@ -158,14 +158,14 @@ data:
     # should have 1:1 with TrainingConfig
     max_epochs: 2
     eval_every: 50
-    log_every: 1
+    log_every: 5
     max_checkpoints: 3
     save_best_only: True # ignored currently
 
     lr_initial: 1e-3
     scheduler: "LambdaLR"
     lambda_type: "cosine"
-    warmup_epochs: 0.5
+    warmup_epochs: 0.1
     warmup_factor: 0.1
     lr_min_factor: 0.1
     decay_epochs: null
@@ -174,7 +174,7 @@ data:
     
     # Optimization & Regularization  
     optimizer: "AdamW"
-    batch_size: 32
+    batch_size: 16
     gradient_accumulation_steps: 1
     weight_decay: 0.0
     clip_grad_norm: 1.0
@@ -186,13 +186,13 @@ data:
     overwrite_output_dir: true
 
     # Evaluation
-    primary_metric: "loss"
+    primary_metric: "f1"
     node_level_metrics: False
     
     # Early Stopping
-    patience: 2
+    patience: 5
     min_delta: 0.0 # largest (most positive) change in tracked eval metric to be considered 
-    early_stopping_sleep_epochs: 0.2
+    early_stopping_sleep_epochs: 0.1
     
     # Training Resumption
     resume_from_checkpoint: null

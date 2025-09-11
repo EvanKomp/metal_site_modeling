@@ -283,14 +283,17 @@ class EquiformerWEdgesForPretraining(EquiformerWEdgesModel):
             out_data['node_embeddings'] = embeddings.embedding
 
         if compute_loss:
-            total_loss, cel_loss, film_loss, per_node_cel_loss = self.compute_loss(
-                batch, logits, film_norm
-            )
-            out_data['loss'] = total_loss
-            out_data['node_loss'] = cel_loss
-            out_data['film_l2_loss'] = film_loss
-            if return_per_node_cel_loss:
-                out_data['node_losses'] = per_node_cel_loss
+            if batch.element_labels is None:
+                pass
+            else:
+                total_loss, cel_loss, film_loss, per_node_cel_loss = self.compute_loss(
+                    batch, logits, film_norm
+                )
+                out_data['loss'] = total_loss
+                out_data['node_loss'] = cel_loss
+                out_data['film_l2_loss'] = film_loss
+                if return_per_node_cel_loss:
+                    out_data['node_losses'] = per_node_cel_loss
 
         return ModelOutput(**out_data)
 

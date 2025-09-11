@@ -355,9 +355,9 @@ stages:
     deps:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 580bf7536778cccd32156a5bca57f386.dir
-      size: 634283309
-      nfiles: 43193
+      md5: 224885b129d73f3b2506b98bdb12d3a2.dir
+      size: 1519231440
+      nfiles: 43202
     params:
       params.yaml:
         2_pretraining.data.dataloader_n_processes: 8
@@ -404,35 +404,35 @@ stages:
     outs:
     - path: data/2/2.0/element_counts.json
       hash: md5
-      md5: cb7fc5d0938cb1fa3ced07942cae5d2c
-      size: 454
+      md5: 9286021ed334d5430f0b3129538cdbb1
+      size: 460
     - path: data/metrics/2/2.0/data_stats.json
       hash: md5
-      md5: 94c1ee66703cd752a356afb7039f1eff
-      size: 1810
+      md5: f85ef3a23d7de97011c3c73c1575c854
+      size: 1804
   2.1_compute_node_class_weights:
     cmd: python pipeline/2_pretraining/2.1_compute_node_class_weights.py
     deps:
     - path: data/2/2.0/element_counts.json
       hash: md5
-      md5: cb7fc5d0938cb1fa3ced07942cae5d2c
-      size: 454
+      md5: 9286021ed334d5430f0b3129538cdbb1
+      size: 460
     params:
       params.yaml:
         2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token: 
           <METAL>
-        2_pretraining.data.loss_weighting.cel_count_to_weight_temperature: 2.0
+        2_pretraining.data.loss_weighting.cel_count_to_weight_temperature: 1.5
         2_pretraining.data.tokenization.active_aggregators:
         - unknown_metal
     outs:
     - path: data/2/2.1/node_class_weights.json
       hash: md5
-      md5: 6f6b5bf818e74563aa56b2067ac46161
-      size: 1658
+      md5: 753a48e0e420a7930f50060ea0a398dc
+      size: 1677
     - path: data/plots/2/2.1/node_class_weights.png
       hash: md5
-      md5: 943f88ba3dcb697abafb71c60e7fd708
-      size: 416043
+      md5: d7ef6716f1477b6a60dded09295faa38
+      size: 413238
   2.3_training:
     cmd: accelerate launch --config_file 
       accelerate_configs/one_process_full_precision.yaml 
@@ -440,13 +440,13 @@ stages:
     deps:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 580bf7536778cccd32156a5bca57f386.dir
-      size: 634283309
-      nfiles: 43193
+      md5: 224885b129d73f3b2506b98bdb12d3a2.dir
+      size: 1519231440
+      nfiles: 43202
     - path: data/2/2.1/node_class_weights.json
       hash: md5
-      md5: 6f6b5bf818e74563aa56b2067ac46161
-      size: 1658
+      md5: 753a48e0e420a7930f50060ea0a398dc
+      size: 1677
     params:
       params.yaml:
         2_pretraining.accelerate_config: 
@@ -477,13 +477,13 @@ stages:
           active_aggregators:
           - unknown_metal
         2_pretraining.model:
-          num_layers: 12
-          sphere_channels: 128
-          attn_hidden_channels: 64
-          num_heads: 8
-          attn_alpha_channels: 64
-          attn_value_channels: 16
-          ffn_hidden_channels: 128
+          num_layers: 4
+          sphere_channels: 24
+          attn_hidden_channels: 6
+          num_heads: 4
+          attn_alpha_channels: 12
+          attn_value_channels: 12
+          ffn_hidden_channels: 24
           norm_type: layer_norm_sh
           lmax_list:
           - 3
@@ -494,7 +494,7 @@ stages:
           max_radius: 12.0
           embedding_dim: 32
           edge_degree_projector_hidden_layers: 2
-          edge_degree_projector_size: 128
+          edge_degree_projector_size: 32
           edge_channels_list:
           use_m_share_rad: false
           attn_activation: silu
@@ -504,8 +504,8 @@ stages:
           use_gate_act: false
           use_grid_mlp: true
           use_sep_s2_act: true
-          alpha_drop: 0.1
-          drop_path_rate: 0.1
+          alpha_drop: 0.0
+          drop_path_rate: 0.0
           proj_drop: 0.0
           weight_init: uniform
           use_topology_gradients: true
@@ -517,35 +517,37 @@ stages:
           film_num_gaussians: 512
           film_basis_function: gaussian
           node_class_weights: true
-          node_class_label_smoothing: 0.0
+          node_class_label_smoothing: 0.1
           film_l2_loss_weight: 0.0
         2_pretraining.training:
-          max_epochs: 100
+          max_epochs: 2
           eval_every: 50
-          log_every: 10
-          max_checkpoints: 5
+          log_every: 5
+          max_checkpoints: 3
           save_best_only: true
-          lr_initial: 0.0001
+          lr_initial: 0.001
           scheduler: LambdaLR
           lambda_type: cosine
-          warmup_epochs: 0
-          warmup_factor: 0.2
-          lr_min_factor: 0.01
+          warmup_epochs: 0.1
+          warmup_factor: 0.1
+          lr_min_factor: 0.1
           decay_epochs:
           decay_rate: 0.1
+          period_epochs: 0.5
           optimizer: AdamW
-          batch_size: 32
+          batch_size: 16
           gradient_accumulation_steps: 1
           weight_decay: 0.0
           clip_grad_norm: 1.0
-          ema_decay:
+          ema_decay: 0.99
           seed:
           run_dir: data/2/2.3_pretraining
           overwrite_output_dir: true
-          primary_metric: val/loss
+          primary_metric: f1
           node_level_metrics: false
-          patience:
+          patience: 5
           min_delta: 0.0
+          early_stopping_sleep_epochs: 0.1
           resume_from_checkpoint:
           reset_optimizer: false
           num_workers: 8
@@ -553,14 +555,27 @@ stages:
           drop_last: true
           shuffle: true
           run_val_at_start: true
+          track_memory: false
+          track_gradients: false
+          gradient_track_patterns:
+          - embedding
+          - mlp.*.weight
+          - mlp.*.bias
+          - output_proj
+          gradient_track_flow: false
     outs:
     - path: data/2/2.3_pretraining/checkpoints
       hash: md5
-      md5: d751713988987e9331980363e24189ce.dir
-      size: 0
-      nfiles: 0
+      md5: ae4d58ca01820171288d979c1bbbf8ac.dir
+      size: 64895008
+      nfiles: 24
+    - path: 
+        data/2/2.3_pretraining/dvclive/plots/images/eval_confusion_matrix.png
+      hash: md5
+      md5: b78e1d0cb0a5bf55cfe4e58caf00508b
+      size: 74920
     - path: data/2/2.3_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: 5ae88db1ca5db926e6c6d8e1aca53095.dir
-      size: 8499
-      nfiles: 2
+      md5: 8c6c18a6591b14bbd268a6638de6858f.dir
+      size: 8685
+      nfiles: 8

@@ -52,6 +52,8 @@ def extract_element_counts(dataloader: DataLoader, collator: MetalSiteCollator, 
     logger.info("Processing dataset to extract element counts...")
     
     for batch_idx, batch in enumerate(dataloader):
+        if batch is None:
+            continue
         if batch_idx % 100 == 0:
             logger.info(f"Processed {batch_idx} batches...")
             

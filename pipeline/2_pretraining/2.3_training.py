@@ -178,7 +178,7 @@ def load_and_split_dataset(params: ParamsObj) -> tuple[Subset, Subset]:
     filtering_params = params.data.filtering
     
     # Initialize dataset with filtering parameters
-    cache_folder = '../bonnanzio_metal_site_modeling/data/1/1.1_parse_sites_metadata'
+    cache_folder = 'data/1/1.1_parse_sites_metadata'
     dataset = MetalSiteDataset(
         cache_folder=cache_folder,
         overwrite=False,

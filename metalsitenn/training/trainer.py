@@ -688,7 +688,11 @@ class MetalSiteTrainer:
                     should_stop = self._tick_early_stopping(tracked_eval_metric)
 
                     # keep track of the best metric, checkpoint will use this.
-                    if self.best_metric is None or (tracked_eval_metric < self.best_metric):
+                    tracked_metric_is_loss = 'loss' in self.training_config.primary_metric.lower()
+                    if tracked_metric_is_loss and (self.best_metric is None or (tracked_eval_metric < (self.best_metric - self.training_config.min_delta))):
+                        is_best = True
+                        self.best_metric = tracked_eval_metric
+                    elif not tracked_metric_is_loss and (self.best_metric is None or (tracked_eval_metric > (self.best_metric + self.training_config.min_delta))):
                         is_best = True
                         self.best_metric = tracked_eval_metric
                     else:

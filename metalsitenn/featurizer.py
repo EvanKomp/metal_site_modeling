@@ -1043,6 +1043,9 @@ class MetalSiteFeaturizer:
                 new_features.append(features)
         featurized_data = new_features
 
+        if len(featurized_data) == 0:
+            return None
+
         # convert to BatchProteinData
         batch_data = featurized_data
         if return_batched:
@@ -1192,8 +1195,9 @@ class MetalSiteCollator:
         )
 
         # set the pdb ids
-        pdb_ids = np.array(pdb_ids, dtype=object).reshape(-1, 1)  # Ensure shape is [N, 1]
-        setattr(featurized_data, 'pdb_id', pdb_ids)
+        if featurized_data is not None:
+            pdb_ids = np.array(pdb_ids, dtype=object).reshape(-1, 1)  # Ensure shape is [N, 1]
+            setattr(featurized_data, 'pdb_id', pdb_ids)
 
         return featurized_data
     
