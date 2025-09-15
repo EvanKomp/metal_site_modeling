@@ -262,9 +262,9 @@ stages:
         data.backbone_treatment: free
         data.coordination_distance: 2.9
         data.debug_max_files:
-        data.max_atoms_per_site: 400
+        data.max_atoms_per_site: 500
         data.max_water_bfactor: 18
-        data.metal_aggregation_distance: 4
+        data.metal_aggregation_distance: 10
         data.metal_site_radius: 10
         data.min_coordinating_residues_per_site: 3
         data.min_residues_per_site: 3
@@ -332,9 +332,9 @@ stages:
     outs:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 224885b129d73f3b2506b98bdb12d3a2.dir
-      size: 1519231440
-      nfiles: 43202
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
   1.0_construct_edquality_mapper:
     cmd: python pipeline/1/1.0_construct_edquality_mapper.py
     deps:
@@ -355,9 +355,9 @@ stages:
     deps:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 224885b129d73f3b2506b98bdb12d3a2.dir
-      size: 1519231440
-      nfiles: 43202
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
     params:
       params.yaml:
         2_pretraining.data.dataloader_n_processes: 8
@@ -404,18 +404,18 @@ stages:
     outs:
     - path: data/2/2.0/element_counts.json
       hash: md5
-      md5: 9286021ed334d5430f0b3129538cdbb1
+      md5: 76fe6ba527db529ab757b851508b5489
       size: 460
     - path: data/metrics/2/2.0/data_stats.json
       hash: md5
-      md5: f85ef3a23d7de97011c3c73c1575c854
-      size: 1804
+      md5: 004e6a6947c1baf02070c4d8c6a295b8
+      size: 1827
   2.1_compute_node_class_weights:
     cmd: python pipeline/2_pretraining/2.1_compute_node_class_weights.py
     deps:
     - path: data/2/2.0/element_counts.json
       hash: md5
-      md5: 9286021ed334d5430f0b3129538cdbb1
+      md5: 76fe6ba527db529ab757b851508b5489
       size: 460
     params:
       params.yaml:
@@ -427,12 +427,12 @@ stages:
     outs:
     - path: data/2/2.1/node_class_weights.json
       hash: md5
-      md5: 753a48e0e420a7930f50060ea0a398dc
-      size: 1677
+      md5: c05d0ac876be6dc91f1b082f4742e0a6
+      size: 1688
     - path: data/plots/2/2.1/node_class_weights.png
       hash: md5
-      md5: d7ef6716f1477b6a60dded09295faa38
-      size: 413238
+      md5: c56b9c0aa5d01c878656ecb3ede4595a
+      size: 414716
   2.3_training:
     cmd: accelerate launch --config_file 
       accelerate_configs/one_process_full_precision.yaml 
@@ -440,13 +440,13 @@ stages:
     deps:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 224885b129d73f3b2506b98bdb12d3a2.dir
-      size: 1519231440
-      nfiles: 43202
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
     - path: data/2/2.1/node_class_weights.json
       hash: md5
-      md5: 753a48e0e420a7930f50060ea0a398dc
-      size: 1677
+      md5: c05d0ac876be6dc91f1b082f4742e0a6
+      size: 1688
     params:
       params.yaml:
         2_pretraining.accelerate_config: 
@@ -471,9 +471,9 @@ stages:
           node_mlm_rate: 0.15
           node_mlm_subrate_tweak: 0.0
           node_mlm_subrate_keep: 0.1
-          residue_collapse_do: false
+          residue_collapse_do: true
           residue_collapse_rate: 0.0
-          residue_collapse_other_atom_noise_sigma: 0.1
+          residue_collapse_other_atom_noise_sigma: 2.0
           active_aggregators:
           - unknown_metal
         2_pretraining.model:
@@ -544,6 +544,7 @@ stages:
           run_dir: data/2/2.3_pretraining
           overwrite_output_dir: true
           primary_metric: f1
+          primary_metric_mode: max
           node_level_metrics: false
           patience: 5
           min_delta: 0.0
@@ -566,16 +567,21 @@ stages:
     outs:
     - path: data/2/2.3_pretraining/checkpoints
       hash: md5
-      md5: ae4d58ca01820171288d979c1bbbf8ac.dir
-      size: 64895008
-      nfiles: 24
+      md5: c361812a5abdfe019f6c87b0fb3a47a7.dir
+      size: 64835296
+      nfiles: 20
     - path: 
         data/2/2.3_pretraining/dvclive/plots/images/eval_confusion_matrix.png
       hash: md5
-      md5: b78e1d0cb0a5bf55cfe4e58caf00508b
-      size: 74920
+      md5: dfc64884edf36f5ca9a0a29cd64bad28
+      size: 84307
     - path: data/2/2.3_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: 8c6c18a6591b14bbd268a6638de6858f.dir
-      size: 8685
+      md5: 2e57d728703531e4429897ebb4ae4810.dir
+      size: 12972
       nfiles: 8
+    - path: data/2/2.3_pretraining/final_model
+      hash: md5
+      md5: d6e92f3c7f2dc25709c2f118b4a17524.dir
+      size: 8614125
+      nfiles: 2

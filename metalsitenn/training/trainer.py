@@ -79,6 +79,7 @@ class TrainerConfig:
     
     # === EVALUATION ===
     primary_metric: str = "val_loss"  # Metric for model selection
+    primary_metric_mode: str = "min"  # one of 'min', 'max'
     node_level_metrics: bool = False
     
     # === EARLY STOPPING ===
@@ -688,11 +689,11 @@ class MetalSiteTrainer:
                     should_stop = self._tick_early_stopping(tracked_eval_metric)
 
                     # keep track of the best metric, checkpoint will use this.
-                    tracked_metric_is_loss = 'loss' in self.training_config.primary_metric.lower()
-                    if tracked_metric_is_loss and (self.best_metric is None or (tracked_eval_metric < (self.best_metric - self.training_config.min_delta))):
+                    tracked_metric_lower_better = (self.training_config.primary_metric_mode == 'min')
+                    if tracked_metric_lower_better and (self.best_metric is None or (tracked_eval_metric < (self.best_metric - self.training_config.min_delta))):
                         is_best = True
                         self.best_metric = tracked_eval_metric
-                    elif not tracked_metric_is_loss and (self.best_metric is None or (tracked_eval_metric > (self.best_metric + self.training_config.min_delta))):
+                    elif not tracked_metric_lower_better and (self.best_metric is None or (tracked_eval_metric > (self.best_metric + self.training_config.min_delta))):
                         is_best = True
                         self.best_metric = tracked_eval_metric
                     else:
@@ -1063,17 +1064,23 @@ class MetalSiteTrainer:
         if self.global_step < first_step_to_start_tracking:
             return False
         else:
+            
             if self.best_metric is None:
                 # here, we asked to start doing early stopping already but we have had no evals yet
                 return False
             # alright buddy time to stop slacking
-            if (current_metric - self.best_metric) > self.training_config.min_delta:
+            delta = (current_metric - self.best_metric)
+            if self.training_config.primary_metric_mode == 'min':
+                delta = -delta
+            if delta > self.training_config.min_delta:
                 self.evals_no_improve += 1
                 self.log_info(f"EARLY STOPPING ticker up to ({self.evals_no_improve}) of  ({self.training_config.patience})"
                               f" observed change since best: {current_metric - self.best_metric}, max allowed: {self.training_config.min_delta}")
                 if self.evals_no_improve >= self.training_config.patience:
                     self.log_info(f"EARLY STOPPING triggered at step {self.global_step}")
                     return True
+            else:
+                self.log_info(f"EARLY STOPPING ticker reset to 0, current change since best: {delta}, max allowed: {self.training_config.min_delta}")
 
     def _save_checkpoint(
         self, 

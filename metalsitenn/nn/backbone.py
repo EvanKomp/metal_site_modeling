@@ -487,8 +487,8 @@ class EquiformerWEdgesBackbone(nn.Module):
         
         # Store enhanced feature parameters
         self.feature_vocab_sizes = feature_vocab_sizes or {}
-        self.atom_features = atom_features or ['element', 'charge', 'nhyd', 'hyb']
-        self.bond_features = bond_features or ['bond_order', 'is_in_ring', 'is_aromatic']
+        self.atom_features = atom_features or ['element']
+        self.bond_features = bond_features
         self.embedding_dim = embedding_dim
         self.edge_degree_projector_hidden_layers = edge_degree_projector_hidden_layers
         self.edge_degree_projector_size = edge_degree_projector_size
@@ -644,9 +644,9 @@ class EquiformerWEdgesBackbone(nn.Module):
             mappingReduced=self.mappingReduced,
             radial_basis_size=self.num_distance_basis,
             feature_vocab_sizes=self.feature_vocab_sizes,
-            use_edge_features=True,
+            use_edge_features=len(self.bond_features) > 0,
             bond_features=self.bond_features,
-            use_node_features=True,
+            use_node_features=len(self.atom_features) > 0,
             node_features=self.atom_features,
             embedding_dim=self.embedding_dim,
             embedding_use_bias=True,
@@ -690,12 +690,12 @@ class EquiformerWEdgesBackbone(nn.Module):
                 edge_channels_list=self.edge_channels_list,
                 use_m_share_rad=self.use_m_share_rad,
                 # Enhanced edge information parameters
-                use_edge_information=True,
+                use_edge_information=len(self.bond_features) > 0 or len(self.atom_features) > 0,
                 radial_basis_size=self.num_distance_basis,
                 feature_vocab_sizes=self.feature_vocab_sizes,
-                use_edge_features=True,
+                use_edge_features=len(self.bond_features) > 0,
                 bond_features=self.bond_features,
-                use_node_features=True,
+                use_node_features=len(self.atom_features) > 0,
                 node_features=self.atom_features,
                 embedding_dim=self.embedding_dim,
                 embedding_use_bias=True,

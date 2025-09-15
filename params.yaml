@@ -8,9 +8,9 @@ data:
   remove_entities: ['SO4', 'PO4', 'CL', 'BR', 'I', 'NO3', 'ACT', 'FMT', 'TRS', 'BIC', 'TRA', 'MES', 'BIS', 'EPE', 'IMD', 'GOL', 'ETG', 'PEG', 'PG4', 'PGE', 'MPD', 'DMS', 'SUC', 'TRE', 'XYL', 'ERY', 'ACE', 'EOH', 'MOH', 'IPA', 'BUT', 'DMF', 'DMSO', 'LDA', 'OP1', 'C8E', 'DDM', 'BOG', 'LMT', 'IOD', 'XE', 'KR', 'BCB', 'BTB', 'CR', 'MB', 'UNX', 'UNL', 'UNK', 'DUM', 'AMS', 'LIS', 'CAS', 'MPO', 'NEP', 'PEN', 'HEX']
   skip_sites_with_entities:  null # list of entitiy names or 'non_metal', in which case if a site contains an antity that does not have a metal, it is skipped (other than water)
   backbone_treatment: free # one of 'ca_only', 'free', 'bound'. For ca_only, Cb , O, N are removed. for free, just the bond is broken. For bound, the bond and all atoms are kept.
-  metal_aggregation_distance: 4 # Distance in Angstroms to aggregate metals into a single site
+  metal_aggregation_distance: 10 # Distance in Angstroms to aggregate metals into a single site
   metal_site_radius: 10 # Radius in Angstroms from metal to include entities in metal binding site
-  max_atoms_per_site: 400 # Maximum number of heavy atoms to consider in a system
+  max_atoms_per_site: 500 # Maximum number of heavy atoms to consider in a system
   coordination_distance: 2.9 # Distance in Angstroms to consider an atom as coordinating a metal
   min_coordinating_residues_per_site: 3 # Minimum number of residues coordinating the metal to consider a site valid
   min_residues_per_site: 3 # Minimum number of residues in a site to consider it valid
@@ -50,9 +50,10 @@ data:
     # tokenization / collation
     tokenization:
       # should have 1:1 with MetalSiteCollator
-      atom_features: ['element', 'charge', 'nhyd', 'hyb']
-      bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
+      atom_features: ['element'] #, 'charge', 'nhyd', 'hyb']
+      bond_features: [] #['bond_order', 'is_in_ring', 'is_aromatic']
       k: 20 # graph size
+      part_of_k_from_topology: 0.0 # what fraction of k should be from topology rather than spatial
       node_mlm_do: True
       node_mlm_rate: 0.15
       node_mlm_subrate_tweak: 0.0
@@ -60,9 +61,9 @@ data:
 
       # this is just here in case we want to train on slightly noised structures
       # its not expected that we will do full collapsing
-      residue_collapse_do: False
+      residue_collapse_do: True
       residue_collapse_rate: 0.0 # KEEP THIS AT 0.0, otherwise if the above is true, it will collapse whole residues
-      residue_collapse_other_atom_noise_sigma: 0.1 # sigma of gaussian in angstroms to noise all atoms in system
+      residue_collapse_other_atom_noise_sigma: 10.0 # sigma of gaussian in angstroms to noise all atoms in system
 
       active_aggregators: ['unknown_metal']
 
@@ -122,7 +123,7 @@ data:
     weight_init: "uniform"
     
     # === TOPOLOGY GRADIENTS ===
-    use_topology_gradients: True
+    use_topology_gradients: False
     topology_gradient_clip: 100.0
     
     # === TIME/FILM MODULATION ===
@@ -187,6 +188,7 @@ data:
 
     # Evaluation
     primary_metric: "f1"
+    primary_metric_mode: "max" # one of 'min', 'max'
     node_level_metrics: False
     
     # Early Stopping

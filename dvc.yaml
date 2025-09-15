@@ -60,6 +60,22 @@ stages:
     plots:
     - data/plots/2/2.1/node_class_weights.png
 
+  2.2_compute_null_model_loss:
+    cmd: python pipeline/2_pretraining/2.2_null_model.py
+    params:
+    - 2_pretraining.data.debug_max_sites
+    - 2_pretraining.data.filtering
+    - 2_pretraining.data.splitting
+    - 2_pretraining.data.tokenization
+    - 2_pretraining.model.node_class_weights
+    - 2_pretraining.model.node_class_label_smoothing
+    deps:
+    - data/1/1.1_parse_sites_metadata
+    - data/2/2.0/element_counts.json
+    - data/2/2.1/node_class_weights.json
+    metrics:
+    - data/metrics/2/2.2/null_model_metrics.json
+
   2.3_training:
     cmd: accelerate launch --config_file ${2_pretraining.accelerate_config} pipeline/2_pretraining/2.3_training.py
     params:

@@ -11,6 +11,8 @@ import numpy as np
 import networkx as nx
 import warnings
 
+from scipy.spatial.distance import pdist
+
 from metalsitenn.tokenizers import TOKENIZERS, Tokenizer
 from metalsitenn.placer_modules.cifutils import Chain, mutate_chain
 from metalsitenn.constants import I2E, RESNAME_3LETTER
@@ -40,6 +42,7 @@ class MetalSiteFeaturizer:
     - atom_features: List[str] - list of atom features to include in the featurization
     - bond_features: List[str] - list of bond features to include in the featurization
     - k: int - Number of atoms in each graph
+    - part_of_k_from_topology: float - What fraction of the k nearest neighbors should be from bonded topology rather than spatial proximity. Eg. 0.5 means half the k nearest neighbors are from bonded topology, half from spatial proximity.
     - custom_tokenizers_init: Dict[str, Tokenizer] - custom tokenizers for specific features instead of the default ones.
         eg. the metals that are modeled at full context can be changed in the ElementTokenizer which defaults to some set
         raises ValueError if any of the requested features are not in the default dict
@@ -51,6 +54,7 @@ class MetalSiteFeaturizer:
             atom_features: List[str] = ['element'],
             bond_features: List[str] = ['bond_order'],
             k: int = 20,
+            part_of_k_from_topology: float = 0.5,
             custom_tokenizers_init: Dict[str, Tokenizer] = None
     ):
         # reasign tokenizers if custom ones are provided
@@ -78,6 +82,7 @@ class MetalSiteFeaturizer:
                 raise ValueError(f"Bond feature '{feature}' tokenizer must have non_bonded_token_id attribute")
             
         self.k = k
+        self.part_of_k_from_topology = part_of_k_from_topology
 
     def _process_atom_features(self, chain: Chain, pdata: ProteinData, active_aggregators: List[str]=None, **kwargs) -> ProteinData:
         """Assign atom based features to the ProteinData object."""
@@ -189,7 +194,8 @@ class MetalSiteFeaturizer:
         src, dst, R = make_top_k_graph(
             r=r,
             hop_distances=hop_distances,
-            k=self.k
+            k=self.k,
+            part_of_k_from_topology=self.part_of_k_from_topology
         )
         edge_index = torch.stack([src, dst], dim=1)  # [E, 2]
 
@@ -769,6 +775,33 @@ class MetalSiteFeaturizer:
                     feature_tensor[metal_edges_mask] = mask_id
         
         return pdata
+    
+    def _validate_chain_geometry(self, chain: Chain) -> bool:
+        """
+        Validate Chain geometry before processing to detect overlapping atoms.
+        
+        Args:
+            chain: Chain object to validate
+            
+        Returns:
+            bool: True if geometry is valid, False if atoms are too close
+        """
+        if len(chain.atoms) < 2:
+            return True
+        
+        # Extract positions
+        positions = np.array([atom.xyz for atom in chain.atoms.values()])
+        
+        # Compute pairwise distances efficiently
+        distances = pdist(positions)
+        
+        # Check if any distance is below threshold
+        min_distance = np.min(distances)
+        if min_distance < 0.6:
+            logger.warning(f"Chain contains atoms too close together (min distance: {min_distance:.3f} Å < 0.6 Å)")
+            return False
+        
+        return True
 
     def __call__(
         self,
@@ -855,6 +888,19 @@ class MetalSiteFeaturizer:
                 raise ValueError("Residue collapsing (residue_collapse_do=True) requires Chain input, not ProteinData")
             if mutations is not None:
                 raise ValueError("Mutations require Chain input, not ProteinData")
+            
+        # TODO: hacking to remove examples with overlapping atoms, this should really be processed early to
+        # potentially salvage examples. For now just filter them out.
+        if is_chain_input:
+            valid_data = []
+            for chain in data:
+                if self._validate_chain_geometry(chain):
+                    valid_data.append(chain)
+                else:
+                    logger.warning("Skipping Chain with invalid geometry (overlapping atoms)")
+            data = valid_data
+            if len(data) == 0:
+                raise ValueError("All input Chains have invalid geometry (overlapping atoms)")
         
         # not sure exactly how MLM and metal classification could work together - the MLM objective may mask
         # over the metal and invalidate the classification task.
@@ -1029,20 +1075,6 @@ class MetalSiteFeaturizer:
             # Append the featurized ProteinData object to the list
             featurized_data.append(features)
 
-        # TODO: temporary fix for systems that have overlapping atoms
-        # fix this in parsing ideally
-        # this is super hacky because a batch of size N might be reduced so batch sizes
-        # will be even more variable
-        new_features = []
-        for features in featurized_data:
-            # hack is to just check any distances for say < 0.6 A
-            if any(features.distances < 0.6):
-                logger.warning(f"Featurizer detected atoms that are too close together in PDB {features.pdb_id} (<0.6 A). Skipping this example.")
-                continue
-            else:
-                new_features.append(features)
-        featurized_data = new_features
-
         if len(featurized_data) == 0:
             return None
 
@@ -1082,6 +1114,7 @@ class MetalSiteCollator:
             atom_features: List[str],
             bond_features: List[str],
             k: int=20,
+            part_of_k_from_topology: float = 0.5,
             custom_tokenizers_init: Dict[str, Tokenizer] = None,
             # for node classification task
             node_mlm_do: bool = False,
@@ -1111,6 +1144,7 @@ class MetalSiteCollator:
             atom_features: List of atom feature names
             bond_features: List of bond feature names
             k: Number of neighbors for graph construction
+            part_of_k_from_topology: Fraction of k neighbors to select from topology
             node_mlm_do: If True, apply MLM-style masking to nodes
             node_mlm_rate: Probability of masking nodes for MLM training (0.0 to 1.0)
             node_mlm_subrate_tweak: Probability of replacing masked nodes with random tokens (default 0.1)
@@ -1136,6 +1170,7 @@ class MetalSiteCollator:
             atom_features=atom_features,
             bond_features=bond_features,
             k=k,
+            part_of_k_from_topology=part_of_k_from_topology,
             custom_tokenizers_init=custom_tokenizers_init)
         
         self.k = k
