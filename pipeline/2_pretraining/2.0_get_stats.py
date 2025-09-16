@@ -222,7 +222,7 @@ def main():
     # Create dataloader for processing
     dataloader = DataLoader(
         dataset,
-        batch_size=1,
+        batch_size=64,
         collate_fn=collator,
         shuffle=False,
         num_workers=dataloader_n_processes,

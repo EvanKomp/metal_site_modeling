@@ -74,7 +74,7 @@ stages:
     - data/2/2.0/element_counts.json
     - data/2/2.1/node_class_weights.json
     metrics:
-    - data/metrics/2/2.2/null_model_metrics.json
+    - data/metrics/2/2.2/null_model_training_metrics.json
 
   2.3_training:
     cmd: accelerate launch --config_file ${2_pretraining.accelerate_config} pipeline/2_pretraining/2.3_training.py
@@ -114,18 +114,17 @@ stages:
     - data/metrics/2/2.4/test_metrics.json
 
 
-  2.5_extract_metal_embeddings:
-    cmd: python pipeline/2_pretraining/2.5_extract_metal_embeddings.py --use-l1-norms --mask-metals
-    params:
-    - 2_pretraining.data.debug_max_sites
-    - 2_pretraining.data.tokenization
-    - 2_pretraining.training
-    - 2_pretraining.tokenization
-    deps:
-    - data/1/1.1_parse_sites_metadata
-    - data/2/2.3_pretraining/final_model
-    outs:
-    - data/2/2.5_embeddings/
+  # 2.5_extract_metal_embeddings:
+  #   cmd: python pipeline/2_pretraining/2.5_extract_metal_embeddings.py --use-l1-norms --mask-metals
+  #   params:
+  #   - 2_pretraining.data.debug_max_sites
+  #   - 2_pretraining.data.tokenization
+  #   - 2_pretraining.training
+  #   deps:
+  #   - data/1/1.1_parse_sites_metadata
+  #   - data/2/2.3_pretraining/final_model
+  #   outs:
+  #   - data/2/2.5_embeddings/
 
     
 
