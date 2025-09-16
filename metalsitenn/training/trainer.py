@@ -264,6 +264,7 @@ class MetalSiteTrainer:
         self.test_dataset = test_dataset
         self.custom_eval_fn = custom_eval_fn if custom_eval_fn is not None else lambda batch, output: getattr(output, 'loss', None)
         self.custom_eval_log_fn = custom_eval_log_fn if custom_eval_log_fn is not None else _default_eval_log_fn
+        
 
         # initialize training objects
         self._setup_accelerator() # first so that we can get access to is_main_process
@@ -277,6 +278,8 @@ class MetalSiteTrainer:
         self._setup_logging_and_checkpointing()
         self._setup_gradient_tracking()
         self._load_checkpoint_if_resuming()
+
+        self.log_info(f"Training configuration: {self.training_config.to_dict()}")
 
     @main_process_only
     def log_info(self, msg):

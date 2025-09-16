@@ -143,6 +143,7 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         
         # Evaluation
         primary_metric=training_params.primary_metric,
+        primary_metric_mode=training_params.primary_metric_mode,
         
         # Early stopping
         patience=training_params.patience,

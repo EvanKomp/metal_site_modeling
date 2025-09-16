@@ -63,7 +63,8 @@ data:
       # its not expected that we will do full collapsing
       residue_collapse_do: True
       residue_collapse_rate: 0.0 # KEEP THIS AT 0.0, otherwise if the above is true, it will collapse whole residues
-      residue_collapse_other_atom_noise_sigma: 10.0 # sigma of gaussian in angstroms to noise all atoms in system
+      residue_collapse_other_atom_noise_sigma: 100.0 # sigma of gaussian in angstroms to noise all atoms in system
+      residue_collapse_ca_fixed: False
 
       active_aggregators: ['unknown_metal']
 

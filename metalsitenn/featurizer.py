@@ -141,6 +141,12 @@ class MetalSiteFeaturizer:
 
         # also asign ground truth positions
         r = torch.tensor([atom.xyz for atom in chain.atoms.values()], dtype=DEFAULT_FLOAT)
+
+        # select a random atom to center around
+        center_atom_idx = np.random.choice(len(r))
+        center_atom_pos = r[center_atom_idx]
+        r = r - center_atom_pos  # center the structure around the chosen atom
+
         setattr(pdata, 'positions', r)
 
         return chain, pdata
@@ -602,6 +608,10 @@ class MetalSiteFeaturizer:
 
         # if we are in here, we should invalidate the distances attribute
         pdata.distances = None
+
+        # TODO TEMPORARY
+        # give all positions as a random gaussian 
+        # pdata.positions = torch.randn_like(pdata.positions) * 5.0
 
         return pdata
 

@@ -51,7 +51,7 @@ def make_top_k_graph(r, hop_distances, k=10, part_of_k_from_topology=0.5) -> Tup
     
     # Calculate topology-based neighbors
     k_topology = int(k * part_of_k_from_topology)
-    _, idx = torch.topk(hop_distances.masked_fill(hop_distances==0, 999), min(k_topology+1, N), largest=False)
+    _, idx = torch.topk(hop_distances.masked_fill(hop_distances==0, 999), min(k_topology, N), largest=False)
     distance_mask = torch.zeros_like(hop_distances, dtype=bool).scatter_(1, idx, True)
     distance_mask = distance_mask & (hop_distances > 0)
 
@@ -64,7 +64,7 @@ def make_top_k_graph(r, hop_distances, k=10, part_of_k_from_topology=0.5) -> Tup
     r_mask = torch.zeros_like(R_, dtype=bool).scatter_(1, idx, True)
 
     # Extract edges (remove self-connections)
-    src, dst = torch.where(r_mask.fill_diagonal_(False))
+    dst, src = torch.where(r_mask.fill_diagonal_(False)) # here each atom should appear exactly k times as a destination
     return src, dst, R
 
 # mutable

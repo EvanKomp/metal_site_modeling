@@ -463,12 +463,11 @@ def visualize_protein_data_3d(
     if focus_atom is not None and protein_data.edge_index is not None:
         edge_indices = protein_data.edge_index  # (E, 2)
         for edge_idx in range(len(edge_indices)):
-            i, j = edge_indices[edge_idx]
-            i, j = i.item(), j.item()
-            if i == focus_atom:
-                focus_neighbors.add(j)
-            elif j == focus_atom:
-                focus_neighbors.add(i)
+            src, dst = edge_indices[edge_idx]
+            dst = dst.item()
+            src = src.item()
+            if dst == focus_atom:
+                focus_neighbors.add(src)
     
     # Create viewer
     viewer = py3Dmol.view(width=width, height=height)
@@ -608,8 +607,11 @@ def visualize_protein_data_3d(
     #         })
     
     # Fallback: Add bonds from edge features if topology unavailable
-    if protein_data.bond_order is not None and protein_data.edge_index is not None:
-        bond_orders = protein_data.bond_order.squeeze(-1)  # (E,)
+    if protein_data.edge_index is not None:
+        if protein_data.bond_order is not None:
+            bond_orders = protein_data.bond_order.squeeze(-1)  # (E,)
+        else:
+            bond_orders = torch.zeros(protein_data.edge_index.shape[0], dtype=torch.long)  # Default to single bonds
         edge_indices = protein_data.edge_index  # (E, 2)
         
         # Get bond tokenizer
@@ -624,11 +626,12 @@ def visualize_protein_data_3d(
             i, j = edge_indices[edge_idx]
             bond_token = bond_orders[edge_idx].item()
             
-            # Skip non-bonds and masked bonds
-            if bond_token == non_bonded_id:
-                continue
-            if mask_token_id is not None and bond_token == mask_token_id:
-                continue
+            # Skip non-bonds and masked bonds (if not focus)
+            if focus_atom is None or (j != focus_atom):
+                if bond_token == non_bonded_id:
+                    continue
+                if mask_token_id is not None and bond_token == mask_token_id:
+                    continue
                 
             # Decode bond order
             try:
@@ -645,7 +648,13 @@ def visualize_protein_data_3d(
                 bond_radius = stick_radius * 1.4
             else:
                 bond_radius = stick_radius
-                
+
+            # make colored line for focus edges
+            c_ = 'gray'
+            if focus_atom is not None and (j == focus_atom):
+                c_ = 'cyan'
+                stick_radius = 0.1
+
             # Add bond as cylinder
             pos_i = positions[i].numpy()
             pos_j = positions[j].numpy()
@@ -654,7 +663,7 @@ def visualize_protein_data_3d(
                 'start': {'x': float(pos_i[0]), 'y': float(pos_i[1]), 'z': float(pos_i[2])},
                 'end': {'x': float(pos_j[0]), 'y': float(pos_j[1]), 'z': float(pos_j[2])},
                 'radius': bond_radius,
-                'color': 'gray',
+                'color': c_,
                 'alpha': 0.8
             })
     
