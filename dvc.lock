@@ -358,6 +358,10 @@ stages:
       md5: d8b00316397064c45236c8ca8c207235.dir
       size: 1550956432
       nfiles: 44261
+    - path: pipeline/2_pretraining/2.0_get_stats.py
+      hash: md5
+      md5: 25e48f503248e94d62d4945dece1851c
+      size: 11067
     params:
       params.yaml:
         _2_pretraining.data.dataloader_n_processes: 8
@@ -381,28 +385,17 @@ stages:
           max_unresolved_removed: 0
           max_resolution: 3.5
           max_max_rczd:
-        _2_pretraining.data.tokenization:
-          atom_features:
-          - element
-          - charge
-          - nhyd
-          - hyb
-          bond_features:
-          - bond_order
-          - is_in_ring
-          - is_aromatic
-          k: 20
-          part_of_k_from_topology: 0.5
-          node_mlm_do: true
-          node_mlm_rate: 0.15
-          node_mlm_subrate_tweak: 0.0
-          node_mlm_subrate_keep: 0.1
-          residue_collapse_do: true
-          residue_collapse_rate: 0.0
-          residue_collapse_other_atom_noise_sigma: 0.0
-          residue_collapse_ca_fixed: false
-          active_aggregators:
-          - unknown_metal
+        _2_pretraining.data.tokenization.active_aggregators:
+        - unknown_metal
+        _2_pretraining.data.tokenization.atom_features:
+        - element
+        - charge
+        - nhyd
+        - hyb
+        _2_pretraining.data.tokenization.bond_features:
+        - bond_order
+        - is_in_ring
+        - is_aromatic
     outs:
     - path: data/2/2.0/element_counts.json
       hash: md5
@@ -419,6 +412,10 @@ stages:
       hash: md5
       md5: 76fe6ba527db529ab757b851508b5489
       size: 460
+    - path: pipeline/2_pretraining/2.1_compute_node_class_weights.py
+      hash: md5
+      md5: 5f4a6985e5da7371b6000f89b9427b45
+      size: 17754
     params:
       params.yaml:
         _2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token: 
@@ -437,7 +434,7 @@ stages:
       size: 414716
   2.3_training:
     cmd: accelerate launch --config_file 
-      accelerate_configs/two_process_ddp_full_precision.yaml 
+      /projects/metalsitenn/metal_site_modeling/accelerate_configs/two_process_ddp_full_precision.yaml
       pipeline/2_pretraining/2.3_training.py
     deps:
     - path: data/1/1.1_parse_sites_metadata
@@ -449,10 +446,14 @@ stages:
       hash: md5
       md5: c05d0ac876be6dc91f1b082f4742e0a6
       size: 1688
+    - path: pipeline/2_pretraining/2.3_training.py
+      hash: md5
+      md5: 0624d61db8bd76b797a9f0d672b9bfd5
+      size: 11319
     params:
       params.yaml:
         _2_pretraining.accelerate_config: 
-          accelerate_configs/two_process_ddp_full_precision.yaml
+          /projects/metalsitenn/metal_site_modeling/accelerate_configs/two_process_ddp_full_precision.yaml
         _2_pretraining.data.debug_max_sites:
         _2_pretraining.data.splitting:
           test_frac: 0.1
@@ -605,6 +606,10 @@ stages:
       hash: md5
       md5: c05d0ac876be6dc91f1b082f4742e0a6
       size: 1688
+    - path: pipeline/2_pretraining/2.2_null_model.py
+      hash: md5
+      md5: 23a1715a461b88e298a233ae842a5bb9
+      size: 16061
     params:
       params.yaml:
         _2_pretraining.data.debug_max_sites:
@@ -673,6 +678,10 @@ stages:
       md5: c513d92174b416175f6bd0d9cb09eb4d.dir
       size: 8608470
       nfiles: 2
+    - path: pipeline/2_pretraining/2.4_evaluate.py
+      hash: md5
+      md5: e04e3bb0c4985a8b4f1dcea1fa7ec15f
+      size: 9698
     params:
       params.yaml:
         _2_pretraining.data.debug_max_sites:

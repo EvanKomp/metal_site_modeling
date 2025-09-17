@@ -38,10 +38,13 @@ stages:
     params:
     - _2_pretraining.data.debug_max_sites
     - _2_pretraining.data.filtering
-    - _2_pretraining.data.tokenization
+    - _2_pretraining.data.tokenization.atom_features
+    - _2_pretraining.data.tokenization.bond_features
+    - _2_pretraining.data.tokenization.active_aggregators
     - _2_pretraining.data.dataloader_n_processes
     deps:
     - data/1/1.1_parse_sites_metadata
+    - pipeline/2_pretraining/2.0_get_stats.py
     outs:
     - data/2/2.0/element_counts.json
     metrics:
@@ -55,6 +58,7 @@ stages:
     - _2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token
     deps:
     - data/2/2.0/element_counts.json
+    - pipeline/2_pretraining/2.1_compute_node_class_weights.py
     outs:
     - data/2/2.1/node_class_weights.json
     plots:
@@ -73,6 +77,7 @@ stages:
     - data/1/1.1_parse_sites_metadata
     - data/2/2.0/element_counts.json
     - data/2/2.1/node_class_weights.json
+    - pipeline/2_pretraining/2.2_null_model.py
     metrics:
     - data/metrics/2/2.2/null_model_training_metrics.json
 
@@ -88,6 +93,7 @@ stages:
     deps:
     - data/1/1.1_parse_sites_metadata
     - data/2/2.1/node_class_weights.json
+    - pipeline/2_pretraining/2.3_training.py
     # - metalsitenn/dataloading.py --- IGNORE code for now, wait until we have working full training script
     # - metalsitenn/nn
     # - metalsitenn/training/trainer.py
@@ -109,6 +115,7 @@ stages:
     deps:
     - data/1/1.1_parse_sites_metadata
     - data/2/2.3_pretraining/final_model
+    - pipeline/2_pretraining/2.4_evaluate.py
     metrics:
     - data/metrics/2/2.4/val_metrics.json
     - data/metrics/2/2.4/test_metrics.json

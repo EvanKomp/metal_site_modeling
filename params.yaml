@@ -154,7 +154,7 @@ _2_pretraining:
     # - get avg_degree from the tokenizer config k
     # - get avg_num_nodes from the dataset stats
 
-  accelerate_config: accelerate_configs/two_process_ddp_full_precision.yaml
+  accelerate_config: /projects/metalsitenn/metal_site_modeling/accelerate_configs/two_process_ddp_full_precision.yaml
 
   training:
     # should have 1:1 with TrainingConfig
