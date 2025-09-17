@@ -162,8 +162,8 @@ def main():
     logger = setup_logging('logs/2.0_get_stats.log')
     
     logger.info("Starting dataset statistics computation")
-    logger.info(f"Filtering params: {PARAMS_['2_pretraining']['data']['filtering']}")
-    logger.info(f"Tokenization params: {PARAMS_['2_pretraining']['data']['tokenization']}")
+    logger.info(f"Filtering params: {PARAMS_['_2_pretraining']['data']['filtering']}")
+    logger.info(f"Tokenization params: {PARAMS_['_2_pretraining']['data']['tokenization']}")
     
     # Create output directories
     output_dir = Path('data/2/2.0')
@@ -173,7 +173,7 @@ def main():
     
     # Initialize dataset with filtering parameters
     cache_folder = 'data/1/1.1_parse_sites_metadata'
-    filtering_params = PARAMS_['2_pretraining']['data']['filtering']
+    filtering_params = PARAMS_['_2_pretraining']['data']['filtering']
     
     try:
         dataset = MetalSiteDataset(
@@ -203,8 +203,8 @@ def main():
     logger.info("Computed basic dataset statistics")
     
     # Initialize collator for featurization
-    tokenization_params = PARAMS_['2_pretraining']['data']['tokenization']
-    dataloader_n_processes = PARAMS_['2_pretraining']['data']['dataloader_n_processes']
+    tokenization_params = PARAMS_['_2_pretraining']['data']['tokenization']
+    dataloader_n_processes = PARAMS_['_2_pretraining']['data']['dataloader_n_processes']
     
     collator = MetalSiteCollator(
         atom_features=tokenization_params['atom_features'],
@@ -233,7 +233,7 @@ def main():
     
     # Extract element counts
     try:
-        element_counts = extract_element_counts(dataloader, collator, max_sites=PARAMS_['2_pretraining']['data']['debug_max_sites'])
+        element_counts = extract_element_counts(dataloader, collator, max_sites=PARAMS_['_2_pretraining']['data']['debug_max_sites'])
         logger.info("Extracted element counts from dataset")
         
         # Save element counts

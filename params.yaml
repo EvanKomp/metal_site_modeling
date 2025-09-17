@@ -17,7 +17,7 @@ data:
   max_water_bfactor: 18
   n_cores: 104
 
-2_pretraining:
+_2_pretraining:
   # related to data filtering and processing
   data:
     debug_max_sites: null
@@ -50,10 +50,10 @@ data:
     # tokenization / collation
     tokenization:
       # should have 1:1 with MetalSiteCollator
-      atom_features: ['element'] #, 'charge', 'nhyd', 'hyb']
-      bond_features: [] #['bond_order', 'is_in_ring', 'is_aromatic']
+      atom_features: ['element', 'charge', 'nhyd', 'hyb']
+      bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
       k: 20 # graph size
-      part_of_k_from_topology: 0.0 # what fraction of k should be from topology rather than spatial
+      part_of_k_from_topology: 0.5 # what fraction of k should be from topology rather than spatial
       node_mlm_do: True
       node_mlm_rate: 0.15
       node_mlm_subrate_tweak: 0.0
@@ -61,7 +61,7 @@ data:
 
       # this is just here in case we want to train on slightly noised structures
       # its not expected that we will do full collapsing
-      residue_collapse_do: False
+      residue_collapse_do: True
       residue_collapse_rate: 0.0 # KEEP THIS AT 0.0, otherwise if the above is true, it will collapse whole residues
       residue_collapse_other_atom_noise_sigma: 0.0 # sigma of gaussian in angstroms to noise all atoms in system
       residue_collapse_ca_fixed: False
@@ -154,7 +154,7 @@ data:
     # - get avg_degree from the tokenizer config k
     # - get avg_num_nodes from the dataset stats
 
-  accelerate_config: accelerate_configs/one_process_full_precision.yaml
+  accelerate_config: accelerate_configs/two_process_ddp_full_precision.yaml
 
   training:
     # should have 1:1 with TrainingConfig

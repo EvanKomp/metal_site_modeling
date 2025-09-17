@@ -36,10 +36,10 @@ stages:
   2.0_get_stats:
     cmd: python pipeline/2_pretraining/2.0_get_stats.py
     params:
-    - 2_pretraining.data.debug_max_sites
-    - 2_pretraining.data.filtering
-    - 2_pretraining.data.tokenization
-    - 2_pretraining.data.dataloader_n_processes
+    - _2_pretraining.data.debug_max_sites
+    - _2_pretraining.data.filtering
+    - _2_pretraining.data.tokenization
+    - _2_pretraining.data.dataloader_n_processes
     deps:
     - data/1/1.1_parse_sites_metadata
     outs:
@@ -50,9 +50,9 @@ stages:
   2.1_compute_node_class_weights:
     cmd: python pipeline/2_pretraining/2.1_compute_node_class_weights.py
     params:
-    - 2_pretraining.data.tokenization.active_aggregators
-    - 2_pretraining.data.loss_weighting.cel_count_to_weight_temperature
-    - 2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token
+    - _2_pretraining.data.tokenization.active_aggregators
+    - _2_pretraining.data.loss_weighting.cel_count_to_weight_temperature
+    - _2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token
     deps:
     - data/2/2.0/element_counts.json
     outs:
@@ -63,12 +63,12 @@ stages:
   2.2_compute_null_model_loss:
     cmd: python pipeline/2_pretraining/2.2_null_model.py
     params:
-    - 2_pretraining.data.debug_max_sites
-    - 2_pretraining.data.filtering
-    - 2_pretraining.data.splitting
-    - 2_pretraining.data.tokenization
-    - 2_pretraining.model.node_class_weights
-    - 2_pretraining.model.node_class_label_smoothing
+    - _2_pretraining.data.debug_max_sites
+    - _2_pretraining.data.filtering
+    - _2_pretraining.data.splitting
+    - _2_pretraining.data.tokenization
+    - _2_pretraining.model.node_class_weights
+    - _2_pretraining.model.node_class_label_smoothing
     deps:
     - data/1/1.1_parse_sites_metadata
     - data/2/2.0/element_counts.json
@@ -77,14 +77,14 @@ stages:
     - data/metrics/2/2.2/null_model_training_metrics.json
 
   2.3_training:
-    cmd: accelerate launch --config_file ${2_pretraining.accelerate_config} pipeline/2_pretraining/2.3_training.py
+    cmd: accelerate launch --config_file ${_2_pretraining.accelerate_config} pipeline/2_pretraining/2.3_training.py
     params:
-    - 2_pretraining.data.debug_max_sites
-    - 2_pretraining.data.splitting
-    - 2_pretraining.data.tokenization
-    - 2_pretraining.model
-    - 2_pretraining.accelerate_config
-    - 2_pretraining.training
+    - _2_pretraining.data.debug_max_sites
+    - _2_pretraining.data.splitting
+    - _2_pretraining.data.tokenization
+    - _2_pretraining.model
+    - _2_pretraining.accelerate_config
+    - _2_pretraining.training
     deps:
     - data/1/1.1_parse_sites_metadata
     - data/2/2.1/node_class_weights.json
@@ -102,10 +102,10 @@ stages:
   2.4_evaluate:
     cmd: python pipeline/2_pretraining/2.4_evaluate.py
     params:
-    - 2_pretraining.data.debug_max_sites
-    - 2_pretraining.data.splitting
-    - 2_pretraining.data.tokenization
-    - 2_pretraining.training
+    - _2_pretraining.data.debug_max_sites
+    - _2_pretraining.data.splitting
+    - _2_pretraining.data.tokenization
+    - _2_pretraining.training
     deps:
     - data/1/1.1_parse_sites_metadata
     - data/2/2.3_pretraining/final_model
@@ -117,9 +117,9 @@ stages:
   # 2.5_extract_metal_embeddings:
   #   cmd: python pipeline/2_pretraining/2.5_extract_metal_embeddings.py --use-l1-norms --mask-metals
   #   params:
-  #   - 2_pretraining.data.debug_max_sites
-  #   - 2_pretraining.data.tokenization
-  #   - 2_pretraining.training
+  #   - _2_pretraining.data.debug_max_sites
+  #   - _2_pretraining.data.tokenization
+  #   - _2_pretraining.training
   #   deps:
   #   - data/1/1.1_parse_sites_metadata
   #   - data/2/2.3_pretraining/final_model

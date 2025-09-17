@@ -253,9 +253,9 @@ def main():
     logger.info("Starting node class weights computation")
     
     # Extract parameters
-    active_aggregators = PARAMS['2_pretraining']['data']['tokenization']['active_aggregators']
-    temperature = PARAMS['2_pretraining']['data']['loss_weighting']['cel_count_to_weight_temperature']
-    clip_token = PARAMS['2_pretraining']['data']['loss_weighting']['cel_count_to_weight_clip_token']
+    active_aggregators = PARAMS['_2_pretraining']['data']['tokenization']['active_aggregators']
+    temperature = PARAMS['_2_pretraining']['data']['loss_weighting']['cel_count_to_weight_temperature']
+    clip_token = PARAMS['_2_pretraining']['data']['loss_weighting']['cel_count_to_weight_clip_token']
     
     logger.info(f"Active aggregators: {active_aggregators}")
     logger.info(f"Temperature: {temperature}")

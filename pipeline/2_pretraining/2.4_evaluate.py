@@ -39,7 +39,7 @@ def setup_logging(log_file: str) -> logging.Logger:
 def load_dvc_params() -> ParamsObj:
     """Load DVC parameters for 2_pretraining stage."""
     params = dvc.api.params_show()
-    return ParamsObj(params)['2_pretraining']
+    return ParamsObj(params)['_2_pretraining']
 
 def initialize_collator(params: ParamsObj) -> MetalSiteCollator:
     """Initialize collator from DVC params."""
