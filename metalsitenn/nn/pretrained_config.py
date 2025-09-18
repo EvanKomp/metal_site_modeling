@@ -84,6 +84,8 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         avg_degree: float = 20, # eg. the graph size
         
         # === TASK-SPECIFIC PARAMETERS ===
+        active_aggregators: List[str] = None, # preconfig options None for no aggregation, or ['unknown_metal','uncommon_metal','allmetal3d_groups']
+        metal_classification_include_special_tokens: bool = True, # add "UNK" and "MASK" tokens to metal classification task
 
         # NODE CLASSIFICATION
         node_class_weights: Optional[List[float]] = None,
@@ -240,6 +242,8 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         self.node_class_weights = node_class_weights
         self.node_class_label_smoothing = node_class_label_smoothing
         self.film_l2_loss_weight = film_l2_loss_weight
+        self.active_aggregators = active_aggregators
+        self.metal_classification_include_special_tokens = metal_classification_include_special_tokens
         
     
     @property

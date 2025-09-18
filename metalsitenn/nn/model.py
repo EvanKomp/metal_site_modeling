@@ -16,10 +16,11 @@ from fairchem.core.models.equiformer_v2.weight_initialization import eqv2_init_w
 from .backbone import EquiformerWEdgesBackbone
 from .pretrained_config import EquiformerWEdgesConfig
 from .heads.node_prediction import NodePredictionHead
+from .heads.graph_prediction import MetalIDHead
 
 from ..graph_data import BatchProteinData, ModelOutput
 
-
+from ..tokenizers import ALL_METALS, DEFAULT_AGGREGATORS
 
 class EquiformerWEdgesPretrainedModel(PreTrainedModel):
     """
@@ -55,8 +56,6 @@ class EquiformerWEdgesPretrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize weights for PreTrainedModel framework compatibility."""
         eqv2_init_weights(module, weight_init=self.config.weight_init)
-
-
 
 class EquiformerWEdgesModel(EquiformerWEdgesPretrainedModel):
     """
@@ -224,6 +223,104 @@ class EquiformerWEdgesForPretraining(EquiformerWEdgesModel):
             out_data['film_l2_loss'] = film_loss
             if return_per_node_cel_loss:
                 out_data['node_losses'] = per_node_cel_loss
+
+        return ModelOutput(**out_data)
+
+class EquiformerWEdgesForMetalClassificationPretraining(EquiformerWEdgesModel):
+    """
+    EquiformerWEdges model for metal count/classification pretraining task.
+    This class can be extended to include specific heads for pretraining.
+    """
+
+    def _init_heads(self):
+        assert 'element' in self.config.feature_vocab_sizes, "Element feature size must be defined in config."
+
+        active_aggregators = self.config.active_aggregators
+        if active_aggregators is None:
+            num_metal_classes = len(ALL_METALS)
+        elif len(active_aggregators) > 1:
+            print("More than one active aggregator specified, defaulting to final aggregator. May cause errors.")
+            num_metal_classes = len(DEFAULT_AGGREGATORS[active_aggregators[-1]])
+        else:
+            num_metal_classes = len(DEFAULT_AGGREGATORS[active_aggregators[0]])
+        
+        if self.config.metal_classification_include_special_tokens:
+            num_metal_classes += 2 # add 2for UNK and MASK tokens
+
+        self.node_prediction_head = MetalIDHead(
+            backbone=self.eqwedges,
+            output_dim=num_metal_classes
+        )
+        self.mse = nn.MSELoss(reduction="none")
+
+    def compute_loss(self, batch: BatchProteinData, logits: torch.Tensor, film_norm: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the loss for the pretraining task.
+        
+        Args:
+            batch (BatchProteinData): Batch of protein data.
+            logits (torch.Tensor): Model predictions.
+        
+        Returns:
+            torch.Tensor: Computed loss.
+        """
+        mse_losses = self.mse(logits, batch.global_labels) # [ batch_size x output_dim ]
+
+        mse_loss = mse_losses.mean() # scalar
+
+        # now do the film loss if its in here
+        if self.config.use_time and self.config.film_l2_loss_weight > 0.0:
+            assert film_norm is not None, "Film norm must be provided when use_time is True."
+            film_loss = film_norm * self.config.film_l2_loss_weight
+            total_loss = mse_loss + film_loss
+        else:
+            film_loss = None
+            total_loss = mse_loss
+            
+
+        return total_loss, mse_loss, film_loss, mse_losses
+    
+    def forward(
+        self,
+        batch: BatchProteinData,
+        compute_loss: bool = True,
+        return_node_embedding_tensor: bool = False,
+        return_per_graph_mse_loss: bool = False,
+        **kwargs
+    ) -> ModelOutput:
+        """
+        Forward pass for the model.
+
+        Args:
+            batch (BatchProteinData): Batch of protein data.
+            compute_loss (bool): Whether to compute the loss.
+            return_per_node_cel_loss (bool): Whether to return per-node cross-entropy loss.
+            **kwargs: Additional keyword arguments.
+
+        Returns:
+            ModelOutput: Output containing node embeddings and film norms.
+        """
+        backbone_outputs = self.eqwedges(
+            batch,
+            **kwargs
+        )
+        embeddings = backbone_outputs['node_embedding']
+        film_norm = backbone_outputs['film_norm']
+        logits = self.node_prediction_head(embeddings)[self.node_prediction_head.output_name] # [ batch_size x output_dim ] (batch size = num chains in batch)
+
+        out_data = {'graph_logits': logits}
+        if return_node_embedding_tensor:
+            out_data['node_embeddings'] = embeddings.embedding
+
+        if compute_loss:
+            total_loss, mse_loss, film_loss, per_class_mse_loss = self.compute_loss(
+                batch, logits, film_norm
+            )
+            out_data['loss'] = total_loss
+            out_data['graph_loss'] = mse_loss
+            out_data['film_l2_loss'] = film_loss
+            if return_per_graph_mse_loss:
+                out_data['class_losses'] = per_class_mse_loss
 
         return ModelOutput(**out_data)
 
