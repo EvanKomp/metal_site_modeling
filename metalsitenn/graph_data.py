@@ -34,32 +34,37 @@ ATOM_LEVEL_NUMPY_FIELDS = ['atom_name', 'atom_resname']
 GLOBAL_NUMPY_FIELDS = ['pdb_id']
 
 
-def make_top_k_graph(r, hop_distances, k=10):
+def make_top_k_graph(r, hop_distances, k=10, part_of_k_from_topology=0.5) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Create a top-k graph based on bond distances.
+    Create a top-k graph based on bond distances and topology.
     
     Args:
         r (torch.Tensor): Positions of atoms, shape (N, 3).
         hop_distances (torch.Tensor): Hop distances between each atom.
         k (int): Number of nearest neighbors to consider for each atom.
-            Up to half are determined by bonding patterns, 
-            the rest by distance.
+        part_of_k_from_topology (float): Fraction of k nearest neighbors to select based on topology.
+    
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: Source indices, destination indices, and distance matrix.
     """
     N = r.shape[0]
-    _,idx = torch.topk(hop_distances.masked_fill(hop_distances==0,999), min(k//2+1,N), largest=False)
-    distance_mask = torch.zeros_like(hop_distances,dtype=bool).scatter_(1,idx,True)
-    distance_mask = distance_mask & (hop_distances>0)
+    
+    # Calculate topology-based neighbors
+    k_topology = int(k * part_of_k_from_topology)
+    _, idx = torch.topk(hop_distances.masked_fill(hop_distances==0, 999), min(k_topology, N), largest=False)
+    distance_mask = torch.zeros_like(hop_distances, dtype=bool).scatter_(1, idx, True)
+    distance_mask = distance_mask & (hop_distances > 0)
 
-    # then pull from actual angstrom distances
-    # first compute pairwise distances|
+    # Compute pairwise distances and prioritize topology neighbors
     R = torch.cdist(r, r)  # (N, N)
-    # fill in distance with the ones we have already chosen so that they are insta chosen
     R_ = R.masked_fill(distance_mask, 0.0)
-    _,idx = torch.topk(R_, min(k+1,N), largest=False)
+    
+    # Select total k neighbors
+    _, idx = torch.topk(R_, min(k+1, N), largest=False)
     r_mask = torch.zeros_like(R_, dtype=bool).scatter_(1, idx, True)
 
-    # get edges
-    src,dst = torch.where(r_mask.fill_diagonal_(False)) # self edge deleted
+    # Extract edges (remove self-connections)
+    dst, src = torch.where(r_mask.fill_diagonal_(False)) # here each atom should appear exactly k times as a destination
     return src, dst, R
 
 # mutable

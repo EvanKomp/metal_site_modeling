@@ -5,7 +5,8 @@
 * Company: National Renewable Energy Lab, Bioeneergy Science and Technology
 * License: MIT
 '''
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Optional, Union,  OrderedDict, Set
+from collections import OrderedDict
 from functools import partial
 from transformers.modeling_utils import PreTrainedModel
 import torch
@@ -20,13 +21,14 @@ from .heads.graph_prediction import MetalIDHead
 
 from ..graph_data import BatchProteinData, ModelOutput
 
+
 from ..tokenizers import ALL_METALS, DEFAULT_AGGREGATORS
 
 class EquiformerWEdgesPretrainedModel(PreTrainedModel):
     """
     EquiformerWEdges backbone model wrapped into PretrainedModel.
     """
-    config_class: EquiformerWEdgesConfig
+    config_class = EquiformerWEdgesConfig
     base_model_prefix = "eqwedges"
 
     def __init__(self, config: EquiformerWEdgesConfig):
@@ -56,6 +58,73 @@ class EquiformerWEdgesPretrainedModel(PreTrainedModel):
     def _init_weights(self, module):
         """Initialize weights for PreTrainedModel framework compatibility."""
         eqv2_init_weights(module, weight_init=self.config.weight_init)
+
+
+    def state_dict(self, destination=None, prefix='', keep_vars=False):
+        """
+        Override state_dict to handle shared tensors and ensure contiguity.
+        
+        Creates independent copies of shared tensors for serialization,
+        ensures all tensors are contiguous, while preserving the original 
+        sharing relationships in memory.
+        
+        Returns:
+            OrderedDict containing serializable state dict with unshared, contiguous tensors
+        """
+        # Get the original state dict
+        original_state_dict = super().state_dict(destination, prefix, keep_vars)
+        
+        # Find tensors that share memory
+        shared_groups = self._find_shared_tensor_groups(original_state_dict)
+        
+        # Create unshared state dict for serialization
+        unshared_state_dict = OrderedDict()
+        processed_ptrs = set()
+        
+        for name, tensor in original_state_dict.items():
+            if isinstance(tensor, torch.Tensor):
+                ptr = tensor.data_ptr()
+                
+                if ptr in shared_groups and ptr not in processed_ptrs:
+                    # First occurrence of this shared tensor - use original but make contiguous
+                    result_tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
+                    unshared_state_dict[name] = result_tensor
+                    processed_ptrs.add(ptr)
+                elif ptr in shared_groups:
+                    # Subsequent occurrence - create independent contiguous copy
+                    unshared_state_dict[name] = tensor.clone().contiguous()
+                else:
+                    # Not shared - ensure contiguous
+                    unshared_state_dict[name] = tensor.contiguous() if not tensor.is_contiguous() else tensor
+            else:
+                # Non-tensor objects
+                unshared_state_dict[name] = tensor
+        
+        return unshared_state_dict
+    
+    def _find_shared_tensor_groups(self, state_dict: Dict[str, torch.Tensor]) -> Dict[int, Set[str]]:
+        """
+        Find groups of parameters that share memory.
+        
+        Args:
+            state_dict: Model state dictionary
+            
+        Returns:
+            Dict mapping memory_ptr -> set of parameter names sharing that memory
+        """
+        ptr_to_names = {}
+        
+        for name, tensor in state_dict.items():
+            ptr = tensor.data_ptr()
+            if ptr not in ptr_to_names:
+                ptr_to_names[ptr] = set()
+            ptr_to_names[ptr].add(name)
+        
+        # Return only groups with multiple members (shared tensors)
+        return {ptr: names for ptr, names in ptr_to_names.items() if len(names) > 1}
+        
+
+
 
 class EquiformerWEdgesModel(EquiformerWEdgesPretrainedModel):
     """
@@ -184,7 +253,7 @@ class EquiformerWEdgesForPretraining(EquiformerWEdgesModel):
     def forward(
         self,
         batch: BatchProteinData,
-        compute_loss: bool = False,
+        compute_loss: bool = True,
         return_per_node_cel_loss: bool = False,
         return_node_embedding_tensor: bool = False,
         **kwargs
@@ -215,14 +284,17 @@ class EquiformerWEdgesForPretraining(EquiformerWEdgesModel):
             out_data['node_embeddings'] = embeddings.embedding
 
         if compute_loss:
-            total_loss, cel_loss, film_loss, per_node_cel_loss = self.compute_loss(
-                batch, logits, film_norm
-            )
-            out_data['loss'] = total_loss
-            out_data['node_loss'] = cel_loss
-            out_data['film_l2_loss'] = film_loss
-            if return_per_node_cel_loss:
-                out_data['node_losses'] = per_node_cel_loss
+            if batch.element_labels is None:
+                pass
+            else:
+                total_loss, cel_loss, film_loss, per_node_cel_loss = self.compute_loss(
+                    batch, logits, film_norm
+                )
+                out_data['loss'] = total_loss
+                out_data['node_loss'] = cel_loss
+                out_data['film_l2_loss'] = film_loss
+                if return_per_node_cel_loss:
+                    out_data['node_losses'] = per_node_cel_loss
 
         return ModelOutput(**out_data)
 

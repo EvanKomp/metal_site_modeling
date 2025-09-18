@@ -42,8 +42,8 @@ class EquiformerWEdgesConfig(PretrainedConfig):
         
         # === MOLECULAR FEATURES ===
         feature_vocab_sizes: Dict[str, int] = None,
-        atom_features: List[str] = None,
-        bond_features: List[str] = None,
+        atom_features: List[str] = ['element', 'charge', 'nhyd', 'hyb'],
+        bond_features: List[str] = ['bond_order', 'is_in_ring', 'is_aromatic'],
         embedding_dim: int = 32,
         edge_degree_projector_hidden_layers: int = 2,
         edge_degree_projector_size: int = 128,
@@ -93,6 +93,7 @@ class EquiformerWEdgesConfig(PretrainedConfig):
 
         # FILM LOSS
         film_l2_loss_weight: float = 0.0,
+        **kwargs
     ):
         """
         Initialize EquiformerWEdgesConfig.
@@ -165,16 +166,7 @@ class EquiformerWEdgesConfig(PretrainedConfig):
             film_l2_loss_weight: L2 loss weight for FiLM regularization.
             
         """
-        super().__init__()
-        # Set default values for lists and dicts
-        if lmax_list is None:
-            lmax_list = [3]
-        if feature_vocab_sizes is None:
-            raise ValueError("feature_vocab_sizes must be provided")
-        if atom_features is None:
-            atom_features = ['element', 'charge', 'nhyd', 'hyb']
-        if bond_features is None:
-            bond_features = ['bond_order', 'is_in_ring', 'is_aromatic']
+        super().__init__(**kwargs)
 
         
         # === CORE ARCHITECTURE ===

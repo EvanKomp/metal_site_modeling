@@ -251,8 +251,8 @@ stages:
       size: 36783
     - path: metalsitenn/placer_modules/cifutils.py
       hash: md5
-      md5: 723a8f98829673c969575fe71103f551
-      size: 106626
+      md5: 34256ef14e331d7da88197e4d2657fa7
+      size: 111463
     - path: pipeline/1/1.1_parse_sites_metadata.py
       hash: md5
       md5: 2d23a4f4bec768fb66986532e945667d
@@ -262,10 +262,10 @@ stages:
         data.backbone_treatment: free
         data.coordination_distance: 2.9
         data.debug_max_files:
-        data.max_atoms_per_site: 400
+        data.max_atoms_per_site: 500
         data.max_water_bfactor: 18
-        data.metal_aggregation_distance: 4
-        data.metal_site_radius: 6
+        data.metal_aggregation_distance: 10
+        data.metal_site_radius: 10
         data.min_coordinating_residues_per_site: 3
         data.min_residues_per_site: 3
         data.n_cores: 104
@@ -332,9 +332,9 @@ stages:
     outs:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 580bf7536778cccd32156a5bca57f386.dir
-      size: 634283309
-      nfiles: 43193
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
   1.0_construct_edquality_mapper:
     cmd: python pipeline/1/1.0_construct_edquality_mapper.py
     deps:
@@ -355,14 +355,18 @@ stages:
     deps:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 580bf7536778cccd32156a5bca57f386.dir
-      size: 634283309
-      nfiles: 43193
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
+    - path: pipeline/2_pretraining/2.0_get_stats.py
+      hash: md5
+      md5: 25e48f503248e94d62d4945dece1851c
+      size: 11067
     params:
       params.yaml:
-        2_pretraining.data.dataloader_n_processes: 8
-        2_pretraining.data.debug_max_sites:
-        2_pretraining.data.filtering:
+        _2_pretraining.data.dataloader_n_processes: 8
+        _2_pretraining.data.debug_max_sites:
+        _2_pretraining.data.filtering:
           valid_metals:
           min_metals:
           max_metals:
@@ -381,82 +385,81 @@ stages:
           max_unresolved_removed: 0
           max_resolution: 3.5
           max_max_rczd:
-        2_pretraining.data.tokenization:
-          atom_features:
-          - element
-          - charge
-          - nhyd
-          - hyb
-          bond_features:
-          - bond_order
-          - is_in_ring
-          - is_aromatic
-          k: 20
-          node_mlm_do: true
-          node_mlm_rate: 0.15
-          node_mlm_subrate_tweak: 0.0
-          node_mlm_subrate_keep: 0.1
-          residue_collapse_do: false
-          residue_collapse_rate: 0.0
-          residue_collapse_other_atom_noise_sigma: 0.1
-          active_aggregators:
-          - unknown_metal
+        _2_pretraining.data.tokenization.active_aggregators:
+        - unknown_metal
+        _2_pretraining.data.tokenization.atom_features:
+        - element
+        - charge
+        - nhyd
+        - hyb
+        _2_pretraining.data.tokenization.bond_features:
+        - bond_order
+        - is_in_ring
+        - is_aromatic
     outs:
     - path: data/2/2.0/element_counts.json
       hash: md5
-      md5: cb7fc5d0938cb1fa3ced07942cae5d2c
-      size: 454
+      md5: 76fe6ba527db529ab757b851508b5489
+      size: 460
     - path: data/metrics/2/2.0/data_stats.json
       hash: md5
-      md5: 94c1ee66703cd752a356afb7039f1eff
-      size: 1810
+      md5: 004e6a6947c1baf02070c4d8c6a295b8
+      size: 1827
   2.1_compute_node_class_weights:
     cmd: python pipeline/2_pretraining/2.1_compute_node_class_weights.py
     deps:
     - path: data/2/2.0/element_counts.json
       hash: md5
-      md5: cb7fc5d0938cb1fa3ced07942cae5d2c
-      size: 454
+      md5: 76fe6ba527db529ab757b851508b5489
+      size: 460
+    - path: pipeline/2_pretraining/2.1_compute_node_class_weights.py
+      hash: md5
+      md5: 5f4a6985e5da7371b6000f89b9427b45
+      size: 17754
     params:
       params.yaml:
-        2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token: 
+        _2_pretraining.data.loss_weighting.cel_count_to_weight_clip_token: 
           <METAL>
-        2_pretraining.data.loss_weighting.cel_count_to_weight_temperature: 2.0
-        2_pretraining.data.tokenization.active_aggregators:
+        _2_pretraining.data.loss_weighting.cel_count_to_weight_temperature: 1.5
+        _2_pretraining.data.tokenization.active_aggregators:
         - unknown_metal
     outs:
     - path: data/2/2.1/node_class_weights.json
       hash: md5
-      md5: 6f6b5bf818e74563aa56b2067ac46161
-      size: 1658
+      md5: c05d0ac876be6dc91f1b082f4742e0a6
+      size: 1688
     - path: data/plots/2/2.1/node_class_weights.png
       hash: md5
-      md5: 943f88ba3dcb697abafb71c60e7fd708
-      size: 416043
+      md5: c56b9c0aa5d01c878656ecb3ede4595a
+      size: 414716
   2.3_training:
     cmd: accelerate launch --config_file 
-      accelerate_configs/one_process_full_precision.yaml 
+      /projects/metalsitenn/metal_site_modeling/accelerate_configs/two_process_ddp_full_precision.yaml
       pipeline/2_pretraining/2.3_training.py
     deps:
     - path: data/1/1.1_parse_sites_metadata
       hash: md5
-      md5: 580bf7536778cccd32156a5bca57f386.dir
-      size: 634283309
-      nfiles: 43193
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
     - path: data/2/2.1/node_class_weights.json
       hash: md5
-      md5: 6f6b5bf818e74563aa56b2067ac46161
-      size: 1658
+      md5: c05d0ac876be6dc91f1b082f4742e0a6
+      size: 1688
+    - path: pipeline/2_pretraining/2.3_training.py
+      hash: md5
+      md5: 0624d61db8bd76b797a9f0d672b9bfd5
+      size: 11319
     params:
       params.yaml:
-        2_pretraining.accelerate_config: 
-          accelerate_configs/one_process_full_precision.yaml
-        2_pretraining.data.debug_max_sites:
-        2_pretraining.data.splitting:
+        _2_pretraining.accelerate_config: 
+          /projects/metalsitenn/metal_site_modeling/accelerate_configs/two_process_ddp_full_precision.yaml
+        _2_pretraining.data.debug_max_sites:
+        _2_pretraining.data.splitting:
           test_frac: 0.1
           val_frac_of_train: 0.05
           seed: 42
-        2_pretraining.data.tokenization:
+        _2_pretraining.data.tokenization:
           atom_features:
           - element
           - charge
@@ -467,23 +470,25 @@ stages:
           - is_in_ring
           - is_aromatic
           k: 20
+          part_of_k_from_topology: 0.5
           node_mlm_do: true
           node_mlm_rate: 0.15
           node_mlm_subrate_tweak: 0.0
           node_mlm_subrate_keep: 0.1
-          residue_collapse_do: false
+          residue_collapse_do: true
           residue_collapse_rate: 0.0
-          residue_collapse_other_atom_noise_sigma: 0.1
+          residue_collapse_other_atom_noise_sigma: 0.0
+          residue_collapse_ca_fixed: false
           active_aggregators:
           - unknown_metal
-        2_pretraining.model:
-          num_layers: 12
-          sphere_channels: 128
-          attn_hidden_channels: 64
-          num_heads: 8
-          attn_alpha_channels: 64
-          attn_value_channels: 16
-          ffn_hidden_channels: 128
+        _2_pretraining.model:
+          num_layers: 4
+          sphere_channels: 24
+          attn_hidden_channels: 6
+          num_heads: 4
+          attn_alpha_channels: 12
+          attn_value_channels: 12
+          ffn_hidden_channels: 24
           norm_type: layer_norm_sh
           lmax_list:
           - 3
@@ -494,7 +499,7 @@ stages:
           max_radius: 12.0
           embedding_dim: 32
           edge_degree_projector_hidden_layers: 2
-          edge_degree_projector_size: 128
+          edge_degree_projector_size: 32
           edge_channels_list:
           use_m_share_rad: false
           attn_activation: silu
@@ -504,11 +509,11 @@ stages:
           use_gate_act: false
           use_grid_mlp: true
           use_sep_s2_act: true
-          alpha_drop: 0.1
-          drop_path_rate: 0.1
+          alpha_drop: 0.0
+          drop_path_rate: 0.0
           proj_drop: 0.0
           weight_init: uniform
-          use_topology_gradients: true
+          use_topology_gradients: false
           topology_gradient_clip: 100.0
           use_time: false
           film_time_embedding_dim: 128
@@ -517,35 +522,38 @@ stages:
           film_num_gaussians: 512
           film_basis_function: gaussian
           node_class_weights: true
-          node_class_label_smoothing: 0.0
+          node_class_label_smoothing: 0.1
           film_l2_loss_weight: 0.0
-        2_pretraining.training:
-          max_epochs: 100
+        _2_pretraining.training:
+          max_epochs: 2
           eval_every: 50
-          log_every: 10
-          max_checkpoints: 5
+          log_every: 5
+          max_checkpoints: 3
           save_best_only: true
-          lr_initial: 0.0001
+          lr_initial: 0.001
           scheduler: LambdaLR
           lambda_type: cosine
-          warmup_epochs: 0
-          warmup_factor: 0.2
-          lr_min_factor: 0.01
+          warmup_epochs: 0.1
+          warmup_factor: 0.1
+          lr_min_factor: 0.1
           decay_epochs:
           decay_rate: 0.1
+          period_epochs: 0.5
           optimizer: AdamW
-          batch_size: 32
+          batch_size: 16
           gradient_accumulation_steps: 1
           weight_decay: 0.0
           clip_grad_norm: 1.0
-          ema_decay:
+          ema_decay: 0.99
           seed:
           run_dir: data/2/2.3_pretraining
           overwrite_output_dir: true
-          primary_metric: val/loss
+          primary_metric: f1
+          primary_metric_mode: max
           node_level_metrics: false
-          patience:
+          patience: 5
           min_delta: 0.0
+          early_stopping_sleep_epochs: 0.1
           resume_from_checkpoint:
           reset_optimizer: false
           num_workers: 8
@@ -553,14 +561,207 @@ stages:
           drop_last: true
           shuffle: true
           run_val_at_start: true
+          track_memory: false
+          track_gradients: false
+          gradient_track_patterns:
+          - embedding
+          - mlp.*.weight
+          - mlp.*.bias
+          - output_proj
+          gradient_track_flow: false
     outs:
     - path: data/2/2.3_pretraining/checkpoints
       hash: md5
-      md5: d751713988987e9331980363e24189ce.dir
-      size: 0
-      nfiles: 0
+      md5: 3fde5c1903ed3e828f5f8017aeb360d6.dir
+      size: 64820512
+      nfiles: 24
+    - path: 
+        data/2/2.3_pretraining/dvclive/plots/images/eval_confusion_matrix.png
+      hash: md5
+      md5: 937bda5fe4855c9a540d45128cbdc6e2
+      size: 71303
     - path: data/2/2.3_pretraining/dvclive/plots/metrics
       hash: md5
-      md5: 5ae88db1ca5db926e6c6d8e1aca53095.dir
-      size: 8499
+      md5: 6a3e8933d3c03ac91376215c3d80c908.dir
+      size: 36962
+      nfiles: 8
+    - path: data/2/2.3_pretraining/final_model
+      hash: md5
+      md5: c513d92174b416175f6bd0d9cb09eb4d.dir
+      size: 8608470
       nfiles: 2
+  2.2_compute_null_model_loss:
+    cmd: python pipeline/2_pretraining/2.2_null_model.py
+    deps:
+    - path: data/1/1.1_parse_sites_metadata
+      hash: md5
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
+    - path: data/2/2.0/element_counts.json
+      hash: md5
+      md5: 76fe6ba527db529ab757b851508b5489
+      size: 460
+    - path: data/2/2.1/node_class_weights.json
+      hash: md5
+      md5: c05d0ac876be6dc91f1b082f4742e0a6
+      size: 1688
+    - path: pipeline/2_pretraining/2.2_null_model.py
+      hash: md5
+      md5: 23a1715a461b88e298a233ae842a5bb9
+      size: 16061
+    params:
+      params.yaml:
+        _2_pretraining.data.debug_max_sites:
+        _2_pretraining.data.filtering:
+          valid_metals:
+          min_metals:
+          max_metals:
+          min_organic_ligands:
+          max_organic_ligands:
+          min_waters:
+          max_waters:
+          min_nucleotides:
+          max_nucleotides:
+          min_amino_acids: 4
+          max_amino_acids:
+          min_co_amino_acids: 2
+          max_co_amino_acids:
+          min_sites_per_pdb:
+          max_sites_per_pdb:
+          max_unresolved_removed: 0
+          max_resolution: 3.5
+          max_max_rczd:
+        _2_pretraining.data.splitting:
+          test_frac: 0.1
+          val_frac_of_train: 0.05
+          seed: 42
+        _2_pretraining.data.tokenization:
+          atom_features:
+          - element
+          - charge
+          - nhyd
+          - hyb
+          bond_features:
+          - bond_order
+          - is_in_ring
+          - is_aromatic
+          k: 20
+          part_of_k_from_topology: 0.5
+          node_mlm_do: true
+          node_mlm_rate: 0.15
+          node_mlm_subrate_tweak: 0.0
+          node_mlm_subrate_keep: 0.1
+          residue_collapse_do: true
+          residue_collapse_rate: 0.0
+          residue_collapse_other_atom_noise_sigma: 0.0
+          residue_collapse_ca_fixed: false
+          active_aggregators:
+          - unknown_metal
+        _2_pretraining.model.node_class_label_smoothing: 0.1
+        _2_pretraining.model.node_class_weights: true
+    outs:
+    - path: data/metrics/2/2.2/null_model_training_metrics.json
+      hash: md5
+      md5: ade13617eb88bf8b8499912818724f16
+      size: 485
+  2.4_evaluate:
+    cmd: python pipeline/2_pretraining/2.4_evaluate.py
+    deps:
+    - path: data/1/1.1_parse_sites_metadata
+      hash: md5
+      md5: d8b00316397064c45236c8ca8c207235.dir
+      size: 1550956432
+      nfiles: 44261
+    - path: data/2/2.3_pretraining/final_model
+      hash: md5
+      md5: c513d92174b416175f6bd0d9cb09eb4d.dir
+      size: 8608470
+      nfiles: 2
+    - path: pipeline/2_pretraining/2.4_evaluate.py
+      hash: md5
+      md5: 79574b6aa4c3ffe831509e6cf13dfe50
+      size: 9667
+    params:
+      params.yaml:
+        _2_pretraining.data.debug_max_sites:
+        _2_pretraining.data.splitting:
+          test_frac: 0.1
+          val_frac_of_train: 0.05
+          seed: 42
+        _2_pretraining.data.tokenization:
+          atom_features:
+          - element
+          - charge
+          - nhyd
+          - hyb
+          bond_features:
+          - bond_order
+          - is_in_ring
+          - is_aromatic
+          k: 20
+          part_of_k_from_topology: 0.5
+          node_mlm_do: true
+          node_mlm_rate: 0.15
+          node_mlm_subrate_tweak: 0.0
+          node_mlm_subrate_keep: 0.1
+          residue_collapse_do: true
+          residue_collapse_rate: 0.0
+          residue_collapse_other_atom_noise_sigma: 0.0
+          residue_collapse_ca_fixed: false
+          active_aggregators:
+          - unknown_metal
+        _2_pretraining.training:
+          max_epochs: 2
+          eval_every: 50
+          log_every: 5
+          max_checkpoints: 3
+          save_best_only: true
+          lr_initial: 0.001
+          scheduler: LambdaLR
+          lambda_type: cosine
+          warmup_epochs: 0.1
+          warmup_factor: 0.1
+          lr_min_factor: 0.1
+          decay_epochs:
+          decay_rate: 0.1
+          period_epochs: 0.5
+          optimizer: AdamW
+          batch_size: 16
+          gradient_accumulation_steps: 1
+          weight_decay: 0.0
+          clip_grad_norm: 1.0
+          ema_decay: 0.99
+          seed:
+          run_dir: data/2/2.3_pretraining
+          overwrite_output_dir: true
+          primary_metric: f1
+          primary_metric_mode: max
+          node_level_metrics: false
+          patience: 5
+          min_delta: 0.0
+          early_stopping_sleep_epochs: 0.1
+          resume_from_checkpoint:
+          reset_optimizer: false
+          num_workers: 8
+          pin_memory: true
+          drop_last: true
+          shuffle: true
+          run_val_at_start: true
+          track_memory: false
+          track_gradients: false
+          gradient_track_patterns:
+          - embedding
+          - mlp.*.weight
+          - mlp.*.bias
+          - output_proj
+          gradient_track_flow: false
+    outs:
+    - path: data/metrics/2/2.4/test_metrics.json
+      hash: md5
+      md5: 1053543af758eddbcb8dbf4feecd28e9
+      size: 170
+    - path: data/metrics/2/2.4/val_metrics.json
+      hash: md5
+      md5: d4868f094db704782a11dd2ada9c0501
+      size: 172

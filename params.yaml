@@ -8,16 +8,16 @@ data:
   remove_entities: ['SO4', 'PO4', 'CL', 'BR', 'I', 'NO3', 'ACT', 'FMT', 'TRS', 'BIC', 'TRA', 'MES', 'BIS', 'EPE', 'IMD', 'GOL', 'ETG', 'PEG', 'PG4', 'PGE', 'MPD', 'DMS', 'SUC', 'TRE', 'XYL', 'ERY', 'ACE', 'EOH', 'MOH', 'IPA', 'BUT', 'DMF', 'DMSO', 'LDA', 'OP1', 'C8E', 'DDM', 'BOG', 'LMT', 'IOD', 'XE', 'KR', 'BCB', 'BTB', 'CR', 'MB', 'UNX', 'UNL', 'UNK', 'DUM', 'AMS', 'LIS', 'CAS', 'MPO', 'NEP', 'PEN', 'HEX']
   skip_sites_with_entities:  null # list of entitiy names or 'non_metal', in which case if a site contains an antity that does not have a metal, it is skipped (other than water)
   backbone_treatment: free # one of 'ca_only', 'free', 'bound'. For ca_only, Cb , O, N are removed. for free, just the bond is broken. For bound, the bond and all atoms are kept.
-  metal_aggregation_distance: 4 # Distance in Angstroms to aggregate metals into a single site
-  metal_site_radius: 6 # Radius in Angstroms from metal to include entities in metal binding site
-  max_atoms_per_site: 400 # Maximum number of heavy atoms to consider in a system
+  metal_aggregation_distance: 10 # Distance in Angstroms to aggregate metals into a single site
+  metal_site_radius: 10 # Radius in Angstroms from metal to include entities in metal binding site
+  max_atoms_per_site: 500 # Maximum number of heavy atoms to consider in a system
   coordination_distance: 2.9 # Distance in Angstroms to consider an atom as coordinating a metal
   min_coordinating_residues_per_site: 3 # Minimum number of residues coordinating the metal to consider a site valid
   min_residues_per_site: 3 # Minimum number of residues in a site to consider it valid
   max_water_bfactor: 18
   n_cores: 104
 
-2_pretraining:
+_2_pretraining:
   # related to data filtering and processing
   data:
     debug_max_sites: null
@@ -53,6 +53,7 @@ data:
       atom_features: ['element', 'charge', 'nhyd', 'hyb']
       bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
       k: 20 # graph size
+      part_of_k_from_topology: 0.5 # what fraction of k should be from topology rather than spatial
       node_mlm_do: True
       node_mlm_rate: 0.15
       node_mlm_subrate_tweak: 0.0
@@ -60,14 +61,15 @@ data:
 
       # this is just here in case we want to train on slightly noised structures
       # its not expected that we will do full collapsing
-      residue_collapse_do: False
+      residue_collapse_do: True
       residue_collapse_rate: 0.0 # KEEP THIS AT 0.0, otherwise if the above is true, it will collapse whole residues
-      residue_collapse_other_atom_noise_sigma: 0.1 # sigma of gaussian in angstroms to noise all atoms in system
+      residue_collapse_other_atom_noise_sigma: 0.0 # sigma of gaussian in angstroms to noise all atoms in system
+      residue_collapse_ca_fixed: False
 
       active_aggregators: ['unknown_metal']
 
     loss_weighting:
-      cel_count_to_weight_temperature: 2.0
+      cel_count_to_weight_temperature: 1.5
       cel_count_to_weight_clip_token: '<METAL>' # clip upweighting of any rarer tokens than this by this weight
 
     dataloader_n_processes: 8 # number of processes to use for data loading NOTE: Not used for training this is for getting dataset stats
@@ -76,13 +78,13 @@ data:
     # should have 1:1 with EquiformerWEdgesConfig
     
     # === CORE ARCHITECTURE ===
-    num_layers: 12
-    sphere_channels: 128
-    attn_hidden_channels: 64
-    num_heads: 8
-    attn_alpha_channels: 64
-    attn_value_channels: 16
-    ffn_hidden_channels: 128
+    num_layers: 4 # 12
+    sphere_channels: 24 # 128
+    attn_hidden_channels: 6 # 64
+    num_heads: 4 # 8
+    attn_alpha_channels: 12 # 64
+    attn_value_channels: 12 # 16
+    ffn_hidden_channels: 24 # 128
     norm_type: "layer_norm_sh"
     lmax_list: [3]
     mmax_list: null
@@ -100,7 +102,7 @@ data:
     # bond_features: ['bond_order', 'is_in_ring', 'is_aromatic']
     embedding_dim: 32
     edge_degree_projector_hidden_layers: 2
-    edge_degree_projector_size: 128
+    edge_degree_projector_size: 32
     edge_channels_list: null
     
     # === ATTENTION MECHANISMS ===
@@ -116,13 +118,13 @@ data:
     use_sep_s2_act: True
     
     # === REGULARIZATION ===
-    alpha_drop: 0.1
-    drop_path_rate: 0.1
+    alpha_drop: 0.0
+    drop_path_rate: 0.0
     proj_drop: 0.0
     weight_init: "uniform"
     
     # === TOPOLOGY GRADIENTS ===
-    use_topology_gradients: True
+    use_topology_gradients: False
     topology_gradient_clip: 100.0
     
     # === TIME/FILM MODULATION ===
@@ -140,7 +142,7 @@ data:
     # === TASK-SPECIFIC PARAMETERS ===    
     # NODE CLASSIFICATION
     node_class_weights: true # the config class expects tensor, here put true or false to use weights from 2.1 script
-    node_class_label_smoothing: 0.0
+    node_class_label_smoothing: 0.1
     
     # FILM LOSS
     film_l2_loss_weight: 0.0
@@ -152,46 +154,48 @@ data:
     # - get avg_degree from the tokenizer config k
     # - get avg_num_nodes from the dataset stats
 
-  accelerate_config: accelerate_configs/one_process_full_precision.yaml
+  accelerate_config: /projects/metalsitenn/metal_site_modeling/accelerate_configs/two_process_ddp_full_precision.yaml
 
   training:
     # should have 1:1 with TrainingConfig
-    max_epochs: 100
+    max_epochs: 2
     eval_every: 50
-    log_every: 10
-    max_checkpoints: 5
-    save_best_only: True
+    log_every: 5
+    max_checkpoints: 3
+    save_best_only: True # ignored currently
 
-    lr_initial: 1e-4
+    lr_initial: 1e-3
     scheduler: "LambdaLR"
     lambda_type: "cosine"
-    warmup_epochs: 0
-    warmup_factor: 0.2
-    lr_min_factor: 0.01
+    warmup_epochs: 0.1
+    warmup_factor: 0.1
+    lr_min_factor: 0.1
     decay_epochs: null
     decay_rate: 0.1
+    period_epochs: 0.5
     
     # Optimization & Regularization  
     optimizer: "AdamW"
-    batch_size: 32
+    batch_size: 16
     gradient_accumulation_steps: 1
     weight_decay: 0.0
     clip_grad_norm: 1.0
-    ema_decay: null
+    ema_decay: 0.99
     
     # Reproducibility & Directories
     seed: null
     run_dir: data/2/2.3_pretraining
     overwrite_output_dir: true
 
-    
     # Evaluation
-    primary_metric: "val/loss"
+    primary_metric: "f1"
+    primary_metric_mode: "max" # one of 'min', 'max'
     node_level_metrics: False
     
     # Early Stopping
-    patience: null
-    min_delta: 0.0
+    patience: 5
+    min_delta: 0.0 # largest (most positive) change in tracked eval metric to be considered 
+    early_stopping_sleep_epochs: 0.1
     
     # Training Resumption
     resume_from_checkpoint: null
@@ -206,4 +210,9 @@ data:
     # Advanced Training
     run_val_at_start: True
 
-    
+    # debugging
+    track_memory: False
+
+    track_gradients: False
+    gradient_track_patterns: ['embedding', 'mlp.*.weight', 'mlp.*.bias', 'output_proj']
+    gradient_track_flow: False

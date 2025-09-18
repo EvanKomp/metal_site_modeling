@@ -22,24 +22,29 @@ from metalsitenn.nn.pretrained_config import EquiformerWEdgesConfig
 from metalsitenn.training.trainer import TrainerConfig, MetalSiteTrainer
 from metalsitenn.nn.model import EquiformerWEdgesForPretraining
 
-logger = logging.getLogger(__name__)
+from metalsitenn.training.pretraining_scoring import custom_eval_batch, custom_eval_logger
 
 def setup_logging(log_file: str) -> logging.Logger:
     """Setup logging configuration."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file, mode='w'),
-            logging.StreamHandler()
-        ]
-    )
+
+    # only for main process
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    if local_rank == 0:
+
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler(log_file, mode='w'),
+                logging.StreamHandler()
+            ]
+        )
     return logging.getLogger(__name__)
 
 def load_dvc_params() -> ParamsObj:
     """Load DVC parameters for 2_pretraining stage."""
     params = dvc.api.params_show()
-    return ParamsObj(params)['2_pretraining']
+    return ParamsObj(params)['_2_pretraining']
 
 
 def initialize_model_config(params: ParamsObj, collator: MetalSiteCollator) -> EquiformerWEdgesConfig:
@@ -121,6 +126,7 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         lr_min_factor=training_params.lr_min_factor,
         decay_epochs=training_params.decay_epochs,
         decay_rate=training_params.decay_rate,
+        period_epochs=training_params.period_epochs,
         
         # Optimization & regularization
         optimizer=training_params.optimizer,
@@ -137,11 +143,13 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         
         # Evaluation
         primary_metric=training_params.primary_metric,
+        primary_metric_mode=training_params.primary_metric_mode,
         
         # Early stopping
         patience=training_params.patience,
         min_delta=training_params.min_delta,
-        
+        early_stopping_sleep_epochs=training_params.early_stopping_sleep_epochs,
+
         # Training resumption
         resume_from_checkpoint=training_params.resume_from_checkpoint,
         reset_optimizer=training_params.reset_optimizer,
@@ -153,7 +161,14 @@ def initialize_training_config(params: ParamsObj) -> TrainerConfig:
         shuffle=training_params.shuffle,
         
         # Advanced training
-        run_val_at_start=training_params.run_val_at_start
+        run_val_at_start=training_params.run_val_at_start,
+
+        # debugging
+        track_memory=training_params.track_memory,
+
+        track_gradients=training_params.track_gradients,
+        gradient_track_patterns=training_params.gradient_track_patterns,
+        gradient_track_flow=training_params.gradient_track_flow,
     )
     
     return training_config
@@ -195,6 +210,15 @@ def load_and_split_dataset(params: ParamsObj) -> tuple[Subset, Subset]:
     train_indices = indices[:train_size]
     val_indices = indices[train_size:train_size + val_size]
     test_indices = indices[train_size + val_size:]
+
+    # if debug size
+    if params.data.debug_max_sites:
+        if len(train_indices) > params.data.debug_max_sites:
+            train_indices = train_indices[:params.data.debug_max_sites]
+        if len(val_indices) > params.data.debug_max_sites:
+            val_indices = val_indices[:params.data.debug_max_sites]
+        if len(test_indices) > params.data.debug_max_sites:
+            test_indices = test_indices[:params.data.debug_max_sites]
     
     # Create subset datasets
     train_dataset = Subset(dataset, train_indices)
@@ -254,7 +278,9 @@ def main():
         collator=collator,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        test_dataset=test_dataset
+        test_dataset=test_dataset,
+        custom_eval_fn=custom_eval_batch,
+        custom_eval_log_fn=custom_eval_logger,
     )
     
     logger.info("Starting training...")
