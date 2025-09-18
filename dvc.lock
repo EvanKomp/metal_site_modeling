@@ -680,8 +680,8 @@ stages:
       nfiles: 2
     - path: pipeline/2_pretraining/2.4_evaluate.py
       hash: md5
-      md5: e04e3bb0c4985a8b4f1dcea1fa7ec15f
-      size: 9698
+      md5: 79574b6aa4c3ffe831509e6cf13dfe50
+      size: 9667
     params:
       params.yaml:
         _2_pretraining.data.debug_max_sites:
@@ -759,9 +759,9 @@ stages:
     outs:
     - path: data/metrics/2/2.4/test_metrics.json
       hash: md5
-      md5: 13c80e9802d3c9cace192fd6ee85afce
-      size: 169
+      md5: 1053543af758eddbcb8dbf4feecd28e9
+      size: 170
     - path: data/metrics/2/2.4/val_metrics.json
       hash: md5
-      md5: 149d60a342c2508beb163adc98ce642d
-      size: 167
+      md5: d4868f094db704782a11dd2ada9c0501
+      size: 172
