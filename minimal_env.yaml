@@ -1,0 +1,27 @@
+name: /projects/proteinml/.links/miniconda3/envs/metal3
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - joblib=1.5.1
+  - numpy=1.26.4
+  - openbabel=3.1.1
+  - pandas=2.2.3
+  - pip=25.1
+  - python=3.9.23
+  - sqlite=3.45.3
+  - wheel=0.45.1
+  - pip:
+    - dvc==3.59.0
+    - ipykernel==6.29.5
+    - ipython==8.18.1
+    - ipywidgets==8.1.7
+    - jupyter==1.1.1
+    - jupyterlab==4.4.3
+    - pillow==11.2.1
+    - py3dmol==2.5.0
+    - scipy==1.13.1
+    - torch==2.4.1
+variables:
+  PYTHONPATH: :/projects/metalsitenn/pdbx
+prefix: /projects/proteinml/.links/miniconda3/envs/metal3
